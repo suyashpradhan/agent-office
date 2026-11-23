@@ -10,6 +10,12 @@
 //   POST /api/tasks/:id/retry
 //   POST /api/tasks/:id/cancel
 //   GET  /api/tasks/:id/files/:name a deliverable file (e.g. the designer's mockup)
+//   GET  /api/routines              scheduled tasks
+//   POST /api/routines              { name, title, brief, stages, review, schedule }
+//   POST /api/routines/:id          update, e.g. { enabled: false }
+//   POST /api/routines/:id/run      create its task right now
+//   POST /api/routines/:id/remove
+//   GET  /api/schedule/preview?cron=0+9+*+*+1-5   plain English + next 3 runs
 //   GET  /api/agents/:id
 //   POST /api/agents/:id/stop
 //   POST /api/office/pause | /api/office/resume
@@ -33,6 +39,12 @@ export function createServer({ orch, bus }) {
     ['POST', /^\/api\/tasks\/(\d+)\/cancel$/, ([id]) => orch.cancel(id)],
     ['GET', /^\/api\/agents\/([\w-]+)$/, ([id]) => orch.agentDetail(id)],
     ['POST', /^\/api\/agents\/([\w-]+)\/stop$/, ([id]) => orch.stopAgent(id)],
+    ['GET', /^\/api\/routines$/, () => orch.listRoutines()],
+    ['POST', /^\/api\/routines$/, (_, body) => orch.createRoutine(body)],
+    ['POST', /^\/api\/routines\/(\d+)$/, ([id], body) => orch.updateRoutine(id, body)],
+    ['POST', /^\/api\/routines\/(\d+)\/run$/, ([id]) => orch.runRoutineNow(id)],
+    ['POST', /^\/api\/routines\/(\d+)\/remove$/, ([id]) => orch.removeRoutine(id)],
+    ['GET', /^\/api\/schedule\/preview$/, (_, __, url) => orch.schedulePreview(url.searchParams.get('cron'))],
     ['POST', /^\/api\/office\/pause$/, () => orch.setPaused(true)],
     ['POST', /^\/api\/office\/resume$/, () => orch.setPaused(false)],
   ];
@@ -57,7 +69,7 @@ export function createServer({ orch, bus }) {
           const m = url.pathname.match(pattern);
           if (m && req.method === method) {
             const body = method === 'POST' ? await readJson(req) : {};
-            return json(res, 200, (await handler(m.slice(1), body)) ?? { ok: true });
+            return json(res, 200, (await handler(m.slice(1), body, url)) ?? { ok: true });
           }
         }
         return json(res, 404, { error: 'Not found' });

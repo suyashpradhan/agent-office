@@ -17,9 +17,10 @@
 - [x] Tests for the above, GitHub Actions CI, LICENSE
 
 ## Phase 3: next steps for learning Paperclip's architecture
-- **Routines**: scheduled tasks ("every morning, research what competitors shipped").
-  A `routines` table plus a check in `heartbeat()` that creates tasks when due.
-  Paperclip: `routines`, scheduled triggers.
+- [x] **Routines**: scheduled tasks ("every Monday, research what competitors shipped").
+  A `routines` table, a cron parser, and a check in `heartbeat()` that creates tasks when due,
+  with overlap (skip while the last task is open) and catch-up (fire once after downtime)
+  policies. Paperclip: `routines`, scheduled triggers.
 - **Delegation**: an agent's deliverable can propose sub-tasks (`NEW_TASK:` lines). The
   orchestrator turns them into child tasks after you approve. Paperclip: org chart, delegation.
 - **A second runtime**: a Codex or Gemini CLI adapter selected per agent (`runtime: codex`).

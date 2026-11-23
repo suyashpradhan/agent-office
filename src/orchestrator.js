@@ -16,9 +16,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseSchedule, nextRun, nextRuns, describeSchedule, renderTitle } from './schedule.js';
 import { ensureWorktree, branchDiff, commitLeftovers, commitsAhead, removeWorktree, pruneWorktrees } from './workspace.js';
 
-export function createOrchestrator({ ws, db, agents, adapter, bus }) {
+// `now` is injectable so tests can move time forward without waiting.
+export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => new Date() }) {
   const byStage = new Map(agents.map((a) => [a.stage, a]));
   const stageOrder = agents.map((a) => a.stage);
   // In-memory runtime state per agent (what the office animates).
@@ -42,21 +44,27 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
       agents: agents.map(publicAgent),
       stages: stageOrder,
       tasks: db.listTasks().map(withMeta),
+      routines: listRoutines(),
     };
   }
 
-  function createTask({ title, brief = '', stages, review }) {
-    title = String(title || '').trim();
-    if (!title) throw httpError(400, 'A task needs a title');
+  function pickStages(stages) {
     const chosen = (Array.isArray(stages) && stages.length ? stages : stageOrder).filter((s) => byStage.has(s));
     if (!chosen.length) throw httpError(400, 'Pick at least one stage');
     // Keep stages in team order even if the UI sends them shuffled.
-    chosen.sort((a, b) => stageOrder.indexOf(a) - stageOrder.indexOf(b));
+    return chosen.sort((a, b) => stageOrder.indexOf(a) - stageOrder.indexOf(b));
+  }
+
+  function createTask({ title, brief = '', stages, review, routineId = null }) {
+    title = String(title || '').trim();
+    if (!title) throw httpError(400, 'A task needs a title');
+    const chosen = pickStages(stages);
     const task = db.createTask({
       title,
       brief: String(brief),
       stages: chosen,
       review: review ?? ws.config.reviewBetweenStages,
+      routineId,
     });
     record({ taskId: task.id, kind: 'system', text: `New task: ${title} (${chosen.join(' -> ')})` });
     emitTask(task.id);
@@ -182,6 +190,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
       setPaused(true, `Budget reached ($${ws.config.budgetUsd}). Raise budgetUsd in .office/config.json to continue.`);
       return;
     }
+    fireDueRoutines();
     for (const agent of agents) {
       if (live.get(agent.id).status !== 'idle') continue;
       const task = db.nextQueuedFor(agent.stage);
@@ -322,6 +331,127 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
     wake();
   }
 
+  // ---------- routines (scheduled tasks) ----------
+  //
+  // A routine is a task template + a cron schedule. The heartbeat checks for due routines
+  // and turns each one into an ordinary task, so everything downstream (agents, reviews,
+  // budget) works exactly the same. Paperclip: routines + scheduled triggers.
+  //
+  // Two policies worth noticing:
+  //   overlap  - if the task from the previous firing is still open, skip this firing
+  //              (otherwise a slow or unreviewed routine piles up duplicate work)
+  //   catch-up - if the office was off or paused through several slots, fire once and
+  //              schedule the next future slot (never a burst of missed runs)
+
+  function listRoutines() {
+    return db.listRoutines().map(publicRoutine);
+  }
+
+  function validateRoutine(input, existing = {}) {
+    const name = String(input.name ?? existing.name ?? '').trim();
+    if (!name) throw httpError(400, 'A routine needs a name');
+    const title = String(input.title ?? existing.title ?? '').trim() || `${name} · {date}`;
+    const schedule = String(input.schedule ?? existing.schedule ?? '').trim();
+    try {
+      parseSchedule(schedule);
+    } catch (err) {
+      throw httpError(400, err.message);
+    }
+    return {
+      name,
+      title,
+      schedule,
+      brief: String(input.brief ?? existing.brief ?? ''),
+      stages: pickStages(input.stages ?? existing.stages),
+      review: input.review ?? existing.review ?? ws.config.reviewBetweenStages,
+    };
+  }
+
+  function createRoutine(input) {
+    const r = validateRoutine(input);
+    const routine = db.createRoutine({ ...r, nextRunAt: nextRun(parseSchedule(r.schedule), now()).toISOString() });
+    record({ kind: 'system', text: `New routine "${routine.name}": ${describeSchedule(routine.schedule)}` });
+    emitRoutines();
+    return publicRoutine(routine);
+  }
+
+  function updateRoutine(id, input) {
+    const existing = mustGetRoutine(id);
+    const fields = {};
+    if (['name', 'title', 'brief', 'stages', 'review', 'schedule'].some((k) => k in input)) {
+      Object.assign(fields, validateRoutine(input, existing));
+    }
+    if ('enabled' in input) fields.enabled = !!input.enabled;
+    // New schedule, or switched back on: next run is the next slot from *now* (no catch-up).
+    if (fields.schedule !== undefined || fields.enabled === true) {
+      fields.next_run_at = nextRun(parseSchedule(fields.schedule ?? existing.schedule), now()).toISOString();
+    }
+    const routine = db.updateRoutine(existing.id, fields);
+    emitRoutines();
+    return publicRoutine(routine);
+  }
+
+  function removeRoutine(id) {
+    const r = mustGetRoutine(id);
+    db.deleteRoutine(r.id);
+    record({ kind: 'system', text: `Removed routine "${r.name}"` });
+    emitRoutines();
+  }
+
+  function runRoutineNow(id) {
+    return publicRoutine(fireRoutine(mustGetRoutine(id), { manual: true }));
+  }
+
+  function fireDueRoutines() {
+    const t = now();
+    for (const r of db.listRoutines()) {
+      if (r.enabled && r.next_run_at && new Date(r.next_run_at) <= t) fireRoutine(r, { manual: false });
+    }
+  }
+
+  function fireRoutine(r, { manual }) {
+    const t = now();
+    const fields = { last_run_at: t.toISOString() };
+    const open = manual ? null : db.openTaskForRoutine(r.id);
+    if (open) {
+      fields.last_result = `Skipped: task #${open.id} from the last run is still open`;
+      record({ taskId: open.id, kind: 'system', text: `Routine "${r.name}" skipped a run: this task is still open` });
+    } else {
+      const task = createTask({ title: renderTitle(r.title, t), brief: r.brief, stages: r.stages, review: r.review, routineId: r.id });
+      fields.last_task_id = task.id;
+      fields.last_result = `Created task #${task.id}${manual ? ' (run now)' : ''}`;
+      record({ taskId: task.id, kind: 'system', text: `Routine "${r.name}" created this task${manual ? ' (you clicked Run now)' : ''}` });
+    }
+    // Catch-up policy: always schedule from now, so missed slots collapse into this one run.
+    if (!manual) fields.next_run_at = nextRun(parseSchedule(r.schedule), t).toISOString();
+    const updated = db.updateRoutine(r.id, fields);
+    emitRoutines();
+    return updated;
+  }
+
+  function schedulePreview(schedule) {
+    try {
+      const spec = parseSchedule(schedule);
+      return { ok: true, description: describeSchedule(schedule), next: nextRuns(spec, now(), 3).map((d) => d.toISOString()) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  function publicRoutine(r) {
+    return { ...r, description: describeSchedule(r.schedule) };
+  }
+
+  function mustGetRoutine(id) {
+    const r = db.getRoutine(Number(id));
+    if (!r) throw httpError(404, 'No such routine');
+    return r;
+  }
+
+  function emitRoutines() {
+    bus.publish('routines', { routines: listRoutines() });
+  }
+
   // ---------- prompt building (the "handoff") ----------
 
   function buildPrompt(task, stage, resuming) {
@@ -393,6 +523,8 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
   return {
     snapshot, createTask, approve, requestChanges, retry, cancel, stopAgent, setPaused,
     taskDetail, agentDetail, taskFile, start, stop,
+    listRoutines, createRoutine, updateRoutine, removeRoutine, runRoutineNow, schedulePreview,
+    tick: heartbeat, // run one heartbeat right now (used by tests)
   };
 }
 

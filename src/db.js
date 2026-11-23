@@ -44,6 +44,21 @@ export function openDb(file) {
       started_at  TEXT NOT NULL DEFAULT (datetime('now')),
       ended_at    TEXT
     );
+    CREATE TABLE IF NOT EXISTS routines (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      name         TEXT NOT NULL,
+      title        TEXT NOT NULL,              -- task title template: {date} {time} {weekday}
+      brief        TEXT NOT NULL DEFAULT '',
+      stages       TEXT NOT NULL,              -- JSON array, like tasks.stages
+      review       INTEGER NOT NULL DEFAULT 1,
+      schedule     TEXT NOT NULL,              -- cron, local time
+      enabled      INTEGER NOT NULL DEFAULT 1,
+      next_run_at  TEXT,                       -- ISO timestamp
+      last_run_at  TEXT,
+      last_task_id INTEGER,
+      last_result  TEXT,                       -- "Created task #4" / "Skipped: ..."
+      created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS activity (
       id       INTEGER PRIMARY KEY AUTOINCREMENT,
       task_id  INTEGER,
@@ -55,17 +70,23 @@ export function openDb(file) {
     );
   `);
 
+  // Migrations: columns added after a project's database was first created.
+  // Each one is safe to run every time (it checks before altering).
+  const hasColumn = (table, column) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!hasColumn('tasks', 'routine_id')) db.exec(`ALTER TABLE tasks ADD COLUMN routine_id INTEGER`);
+
   const q = (sql) => db.prepare(sql);
+  const parseRoutine = (row) => row && { ...row, stages: JSON.parse(row.stages), review: !!row.review, enabled: !!row.enabled };
   const parseTask = (row) => row && { ...row, stages: JSON.parse(row.stages), review: !!row.review };
 
   return {
     raw: db,
 
     // ---- tasks ----
-    createTask({ title, brief, stages, review }) {
+    createTask({ title, brief, stages, review, routineId = null }) {
       const { lastInsertRowid } = q(
-        `INSERT INTO tasks (title, brief, stages, status, review) VALUES (?, ?, ?, 'queued', ?)`,
-      ).run(title, brief, JSON.stringify(stages), review ? 1 : 0);
+        `INSERT INTO tasks (title, brief, stages, status, review, routine_id) VALUES (?, ?, ?, 'queued', ?, ?)`,
+      ).run(title, brief, JSON.stringify(stages), review ? 1 : 0, routineId);
       return this.getTask(Number(lastInsertRowid));
     },
     getTask(id) {
@@ -156,6 +177,36 @@ export function openDb(file) {
       return q(
         `UPDATE tasks SET status = 'queued', assignee = NULL, updated_at = datetime('now') WHERE status = 'running'`,
       ).run().changes;
+    },
+
+    // ---- routines ----
+    createRoutine({ name, title, brief, stages, review, schedule, nextRunAt }) {
+      const { lastInsertRowid } = q(
+        `INSERT INTO routines (name, title, brief, stages, review, schedule, next_run_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(name, title, brief, JSON.stringify(stages), review ? 1 : 0, schedule, nextRunAt);
+      return this.getRoutine(Number(lastInsertRowid));
+    },
+    getRoutine(id) {
+      return parseRoutine(q(`SELECT * FROM routines WHERE id = ?`).get(id));
+    },
+    listRoutines() {
+      return q(`SELECT * FROM routines ORDER BY id`).all().map(parseRoutine);
+    },
+    updateRoutine(id, fields) {
+      const keys = Object.keys(fields);
+      if (!keys.length) return this.getRoutine(id);
+      const value = (k) => (k === 'stages' ? JSON.stringify(fields[k]) : typeof fields[k] === 'boolean' ? Number(fields[k]) : fields[k]);
+      q(`UPDATE routines SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map(value), id);
+      return this.getRoutine(id);
+    },
+    deleteRoutine(id) {
+      q(`DELETE FROM routines WHERE id = ?`).run(id);
+    },
+    // Overlap check: is a task from this routine's previous firing still unfinished?
+    openTaskForRoutine(routineId) {
+      return parseTask(
+        q(`SELECT * FROM tasks WHERE routine_id = ? AND status IN ('queued', 'running', 'review') ORDER BY id DESC LIMIT 1`).get(routineId),
+      );
     },
 
     // ---- activity ----

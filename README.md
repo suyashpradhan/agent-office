@@ -98,6 +98,19 @@ git merge office/task-3
 | `agent-office init` | just create `.office/` so you can edit agents first |
 | `npm test` | end-to-end tests (mock adapter) |
 
+## Routines (scheduled work)
+
+Click the **clock** on the office wall (or the Routines tab) to give the team recurring work,
+for example "every Monday at 9:00, research what competitors shipped". A routine is a task
+template plus a cron schedule (`0 9 * * 1`), and the form explains any schedule in plain English
+and shows the next runs. When it's due, it creates an ordinary task, marked 🔁, that flows
+through the same agents, reviews and budget.
+
+- **No pile-ups:** if the task from the previous run is still open, that run is skipped.
+- **No bursts after downtime:** if the office was off through several slots, the routine fires
+  once when it's back, then waits for the next slot.
+- Times use your computer's clock. Routines only run while `agent-office` is running.
+
 ## Working in the background
 
 Click **Notify me** in the header to get a desktop notification when an agent needs your

@@ -57,7 +57,11 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
    uncommitted in the worktree and flags runs that changed nothing. The dashboard shows the
    branch diff. When the task is done or cancelled, the worktree is removed and the branch kept.
 9. **Timeouts**: a run that takes longer than `runTimeoutMinutes` is aborted and marked failed.
-10. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
+10. **Routines**: every heartbeat also checks `routines` (a task template plus a cron schedule).
+    A due routine creates an ordinary task, so everything above applies to it unchanged. Two
+    policies keep it sane. *Overlap*: skip the run if the routine's previous task is still open.
+    *Catch-up*: after downtime, fire once and schedule the next future slot.
+11. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
    office pauses.
 
 ## Why each piece exists (and its Paperclip equivalent)
@@ -73,6 +77,8 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
 | `budgetUsd`, `--max-budget-usd` | Runaway loops cost real money | `budget_policies`, budget enforcement |
 | Agent `.md` files (tools, workspace) | Least privilege per role | org chart, permissions, governance |
 | Adapter interface | Swap Claude for Codex, Gemini, a mock… | `packages/adapters/*` |
+| `routines` + `schedule.js` | Recurring work without you remembering to start it | routines, scheduled triggers |
+| `hasColumn` migrations in `db.js` | Old projects' databases keep working after upgrades | `packages/db` migrations |
 | Worktree per dev task | Agents never touch your working copy | execution workspaces |
 | `recoverInterrupted()` | Server restarts don't lose work | startup recovery |
 | SSE event bus | The UI is a view of server state | `server/src/realtime` |
@@ -82,9 +88,9 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
 Paperclip is built for many companies, many humans and agents running unattended around the
 clock. To keep this project readable, we skipped multi-tenancy and auth, agents delegating to
 other agents (an org hierarchy), goals and projects above tasks, skills management,
-secrets/connectors, scheduled routines, and plugins. Each would be a reasonable next exercise:
+secrets/connectors, and plugins. (Scheduled routines started on this list and are now built;
+see above.) Each of the rest would be a reasonable next exercise:
 
-- **Routines**: a `routines` table plus a cron check in `heartbeat()` that creates tasks.
 - **Delegation**: let an agent's deliverable include `NEW_TASK:` lines that the orchestrator
   turns into child tasks.
 - **Another runtime**: copy `adapters/claude.js` into `adapters/codex.js` and pick it per agent.

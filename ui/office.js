@@ -58,6 +58,11 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
 
   const hint = el('div', 'hint-label');
   overlay.append(hint);
+  const CLOCK = { x: 64, y: 18 };
+  const clockBadge = el('div', 'clock-badge');
+  clockBadge.style.left = pct(CLOCK.x + 9, W);
+  clockBadge.style.top = pct(CLOCK.y - 7, H);
+  overlay.append(clockBadge);
   const trayBadge = el('div', 'tray-badge');
   trayBadge.style.left = pct(TRAY.x + TRAY.w / 2, W);
   trayBadge.style.top = pct(TRAY.y - 4, H);
@@ -117,6 +122,13 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
     const n = tasks.filter((x) => x.status === 'review').length;
     trayBadge.textContent = n ? String(n) : '';
     trayBadge.classList.toggle('show', n > 0);
+  }
+
+  // A small badge on the wall clock shows how many routines are active.
+  function setRoutines(list) {
+    const n = list.filter((r) => r.enabled).length;
+    clockBadge.textContent = n ? `🔁${n}` : '';
+    clockBadge.classList.toggle('show', n > 0);
   }
 
   function setPaused(value) {
@@ -530,7 +542,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
 
     drawWindow(86, 10);
     drawWindow(346, 10);
-    drawClock(64, 18);
+    drawClock(CLOCK.x, CLOCK.y);
     drawBoard();
     drawDoor();
   }
@@ -572,6 +584,10 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
   }
 
   function drawClock(x, y) {
+    if (hovered === 'clock') {
+      px(x - 8, y - 10, 16, 20, '#ffd65a');
+      px(x - 10, y - 8, 20, 16, '#ffd65a');
+    }
     px(x - 6, y - 8, 12, 16, '#5b4636');
     px(x - 8, y - 6, 16, 12, '#5b4636');
     px(x - 5, y - 6, 10, 12, '#fffaf0');
@@ -866,6 +882,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
     const inside = (r, pad = 0) => lx >= r.x - pad && lx <= r.x + r.w + pad && ly >= r.y - pad && ly <= r.y + r.h + pad;
     if (inside(BOARD, 2)) return { type: 'board', id: 'board', label: 'Task board' };
     if (inside(DOOR)) return { type: 'new', id: 'door', label: 'Hand out new work' };
+    if (inside({ x: CLOCK.x - 9, y: CLOCK.y - 9, w: 18, h: 18 }, 2)) return { type: 'routines', id: 'clock', label: 'Routines: scheduled work' };
     if (inside({ x: MANAGER_DESK.x, y: MANAGER_DESK.y - 12, w: MANAGER_DESK.w, h: MANAGER_DESK.h + 12 })) return { type: 'inbox', id: 'inbox', label: 'Your inbox: work to review' };
     if (inside({ x: COUNTER.x, y: COUNTER.y - 20, w: COUNTER.w, h: COUNTER.h + 20 })) return { type: 'poi', id: 'coffee', poi: 'coffee', label: 'Coffee break!' };
     if (inside(ARCADE)) return { type: 'poi', id: 'arcade', poi: 'arcade', label: 'Arcade' };
@@ -932,7 +949,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
   }
   requestAnimationFrame(frame);
 
-  return { setAgents, setTasks, setPaused, select, runEvent, taskCreated, approvedHandoff, celebrate, sendTo };
+  return { setAgents, setTasks, setRoutines, setPaused, select, runEvent, taskCreated, approvedHandoff, celebrate, sendTo };
 }
 
 function el(tag, cls) {

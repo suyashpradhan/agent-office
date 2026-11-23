@@ -5,7 +5,7 @@ import { createOffice } from './office.js';
 import { drawCharacter } from './sprites.js';
 import { renderMarkdown, escapeHtml as h } from './markdown.js';
 
-const state = { project: {}, adapter: '', office: {}, agents: [], stages: [], tasks: new Map() };
+const state = { project: {}, adapter: '', office: {}, agents: [], stages: [], tasks: new Map(), routines: [] };
 const detailCache = new Map();
 const $ = (sel) => document.querySelector(sel);
 const viewEl = $('#view');
@@ -18,6 +18,7 @@ const office = createOffice({
     if (hit.type === 'board') go('board');
     if (hit.type === 'inbox') go('inbox');
     if (hit.type === 'new') go('new');
+    if (hit.type === 'routines') go('routines');
   },
   onHint: toast,
 });
@@ -41,6 +42,8 @@ function handle(evt) {
       const s = evt.state;
       Object.assign(state, { project: s.project, adapter: s.adapter, office: s.office, agents: s.agents, stages: s.stages });
       state.tasks = new Map(s.tasks.map((t) => [t.id, t]));
+      state.routines = s.routines || [];
+      office.setRoutines(state.routines);
       office.setAgents(state.agents);
       office.setTasks([...state.tasks.values()]);
       office.setPaused(s.office.paused);
@@ -74,6 +77,11 @@ function handle(evt) {
     case 'activity':
       if (evt.entry.task_id) invalidate(evt.entry.task_id);
       if (route().name === 'agent' && route().id === evt.entry.agent_id) scheduleRender();
+      break;
+    case 'routines':
+      state.routines = evt.routines;
+      office.setRoutines(state.routines);
+      if (route().name === 'routines' && !route().id) render();
       break;
     case 'office':
       state.office = evt.office;
@@ -194,7 +202,7 @@ function pipeline(task) {
 function card(task) {
   const a = agentForStage(task.stage);
   return `<a class="card" href="#task/${task.id}" style="--agent:${h(a?.color || '#999')}">
-    <span class="card-title">${h(task.title)}</span>
+    <span class="card-title">${task.routine_id ? '<span title="Created by a routine" aria-label="Created by a routine">🔁</span> ' : ''}${h(task.title)}</span>
     <span class="status ${task.status}">${h(STATUS_LABEL[task.status] || task.status)}</span>
     ${pipeline(task)}
     ${task.costUsd ? `<small class="muted">$${task.costUsd.toFixed(3)}</small>` : ''}
@@ -226,6 +234,141 @@ function viewInbox() {
     ${list.length ? list.map(card).join('') : '<p class="empty">Inbox zero. Nice.</p>'}`;
 }
 
+function stagePicks(selected) {
+  return `<div class="stage-picks">${state.stages
+    .map((s) => {
+      const a = agentForStage(s);
+      return `<label class="pick" style="--agent:${h(a.color)}"><input type="checkbox" name="stages" value="${h(s)}" ${selected.includes(s) ? 'checked' : ''}>
+        ${avatar(a, 2)}<span><strong>${h(a.name)}</strong><br><small>${h(a.title)}</small></span></label>`;
+    })
+    .join('')}</div>`;
+}
+
+// ---------- routines (scheduled tasks) ----------
+
+const PRESETS = [
+  ['0 9 * * 1-5', 'Weekdays 9:00'],
+  ['0 9 * * *', 'Daily 9:00'],
+  ['0 9 * * 1', 'Mondays 9:00'],
+  ['0 17 * * 5', 'Fridays 17:00'],
+  ['0 * * * *', 'Hourly'],
+];
+
+const TEMPLATES = [
+  { name: 'Competitor watch', schedule: '0 9 * * 1', stages: ['research'], brief: 'What did the main competitors and similar open-source projects ship in the last week? Anything we should copy, avoid, or respond to?' },
+  { name: 'Dependency check', schedule: '0 9 * * 1-5', stages: ['research'], brief: 'Check this project\'s dependencies for new major versions, deprecations, and security advisories. Recommend what to upgrade first.' },
+  { name: 'Friday UI polish', schedule: '0 17 * * 5', stages: ['design', 'dev'], brief: 'Find one small, high-impact UI polish in this app (spacing, empty states, copy, accessibility) and implement it.' },
+];
+let pendingTemplate = null;
+
+function rel(ms) {
+  const m = Math.round(Math.abs(ms) / 60000);
+  if (m < 1) return 'now';
+  if (m < 60) return `${m} min`;
+  const hrs = Math.floor(m / 60);
+  if (hrs < 48) return `${hrs} h${m % 60 ? ` ${m % 60} min` : ''}`;
+  return `${Math.round(hrs / 24)} days`;
+}
+function when(iso) {
+  const d = new Date(iso);
+  const abs = d.toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const diff = d - Date.now();
+  return diff <= 0 ? `due now (${abs})` : `in ${rel(diff)} · ${abs}`;
+}
+function ago(iso) {
+  return iso ? `${rel(Date.now() - new Date(iso))} ago` : '';
+}
+
+function viewRoutines() {
+  const list = state.routines;
+  const cards = list
+    .map(
+      (r) => `<div class="routine ${r.enabled ? '' : 'off'}">
+        <div class="routine-head"><strong>${h(r.name)}</strong><span class="chip">🔁 ${h(r.description)}</span></div>
+        <div class="routine-meta">
+          <div><span class="muted">Next</span> ${r.enabled ? h(when(r.next_run_at)) : '<em>Paused</em>'}</div>
+          <div><span class="muted">Last</span> ${r.last_result ? `${h(r.last_result)} <span class="muted">${h(ago(r.last_run_at))}</span>` : 'Never run'}
+            ${r.last_task_id && state.tasks.has(r.last_task_id) ? ` · <a href="#task/${r.last_task_id}">open task</a>` : ''}</div>
+          <div><span class="muted">Team</span> ${r.stages.map((s) => h(agentForStage(s)?.name || s)).join(' → ')}${r.review ? '' : ' <span class="muted">(no review between steps)</span>'}</div>
+        </div>
+        <div class="actions">
+          <button class="btn" data-action="routine-run" data-id="${r.id}">Run now</button>
+          <button class="btn" data-action="routine-toggle" data-id="${r.id}" data-enabled="${r.enabled}">${r.enabled ? 'Pause' : 'Resume'}</button>
+          <a class="btn" href="#routines/${r.id}">Edit</a>
+          <button class="btn danger" data-action="routine-remove" data-id="${r.id}">Remove</button>
+        </div>
+      </div>`,
+    )
+    .join('');
+  const templates = `<h3>Ideas to start from</h3>${TEMPLATES.map(
+    (t, i) => `<button class="template" data-action="routine-template" data-index="${i}">
+      <strong>${h(t.name)}</strong> <span class="muted">· ${h(PRESETS.find((p) => p[0] === t.schedule)?.[1] || t.schedule)}</span><br><small>${h(t.brief)}</small></button>`,
+  ).join('')}`;
+  return `<div class="view-head"><h2>Routines</h2><a class="btn primary" href="#routines/new">+ New routine</a></div>
+    <p class="muted">Scheduled work. When a routine is due, it hands the team a task, as if you had. If the last task it created is still open, it skips that run instead of piling up duplicates. Times use this computer's clock, and routines only run while the office is running.</p>
+    ${cards || '<p class="empty">No routines yet.</p>'}
+    ${list.length < 3 ? templates : ''}`;
+}
+
+function viewRoutineForm(id) {
+  const existing = id && id !== 'new' ? state.routines.find((r) => String(r.id) === String(id)) : null;
+  if (id && id !== 'new' && !existing) throw new Error('That routine no longer exists.');
+  const r = existing || pendingTemplate || { name: '', schedule: '0 9 * * 1-5', stages: state.stages, brief: '' };
+  pendingTemplate = null;
+  return `<a class="back" href="#routines">← Routines</a>
+  <h2>${existing ? `Edit “${h(existing.name)}”` : 'New routine'}</h2>
+  <form id="routineForm" class="form" data-id="${existing ? existing.id : ''}">
+    <label>Name
+      <input name="name" required maxlength="80" value="${h(r.name)}" placeholder="e.g. Competitor watch" autocomplete="off">
+    </label>
+    <label>Task title <span class="muted">(optional; use {date}, {time} or {weekday})</span>
+      <input name="title" maxlength="140" value="${h(existing?.title || '')}" placeholder="Defaults to “Name · {date}”" autocomplete="off">
+    </label>
+    <label>What should the team do each time?
+      <textarea name="brief" rows="4" placeholder="The brief the team gets every run...">${h(r.brief || '')}</textarea>
+    </label>
+    <fieldset><legend>Who works on it, in order</legend>${stagePicks(r.stages || state.stages)}</fieldset>
+    <label class="check"><input type="checkbox" name="review" ${existing && !existing.review ? '' : 'checked'}> Pause for my review after each step</label>
+    <fieldset><legend>When</legend>
+      <div class="preset-chips">${PRESETS.map(([cron, label]) => `<button type="button" class="chip-btn" data-cron="${h(cron)}">${h(label)}</button>`).join('')}</div>
+      <label>Schedule <span class="muted">(cron: minute hour day month weekday)</span>
+        <input name="schedule" required value="${h(r.schedule)}" autocomplete="off" spellcheck="false" class="mono">
+      </label>
+      <p id="schedPreview" class="sched-preview muted" aria-live="polite"></p>
+    </fieldset>
+    <button class="btn primary" type="submit">${existing ? 'Save routine' : 'Create routine'}</button>
+  </form>`;
+}
+
+let previewTimer;
+function updateSchedulePreview() {
+  const input = viewEl.querySelector('#routineForm input[name=schedule]');
+  const out = viewEl.querySelector('#schedPreview');
+  if (!input || !out) return;
+  viewEl.querySelectorAll('.chip-btn').forEach((b) => b.classList.toggle('active', b.dataset.cron === input.value.trim()));
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    try {
+      const p = await api(`/api/schedule/preview?cron=${encodeURIComponent(input.value)}`);
+      out.classList.toggle('bad', !p.ok);
+      out.textContent = p.ok
+        ? `${p.description}. Next: ${p.next.map((d) => new Date(d).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })).join(' · ')}`
+        : p.error;
+    } catch (e) {
+      out.textContent = e.message;
+    }
+  }, 200);
+}
+
+viewEl.addEventListener('input', (e) => {
+  if (e.target.name === 'schedule') updateSchedulePreview();
+});
+
+// Keep "in 3 h" style times fresh on the routines list.
+setInterval(() => {
+  if (route().name === 'routines' && !route().id) render();
+}, 30_000);
+
 function viewNew(stage) {
   const pre = stage ? [stage] : state.stages;
   return `<h2>Hand out work</h2>
@@ -237,13 +380,7 @@ function viewNew(stage) {
       <textarea name="brief" rows="5" placeholder="Context, constraints, links, what good looks like..."></textarea>
     </label>
     <fieldset><legend>Who works on it, in order</legend>
-      <div class="stage-picks">${state.stages
-        .map((s) => {
-          const a = agentForStage(s);
-          return `<label class="pick" style="--agent:${h(a.color)}"><input type="checkbox" name="stages" value="${h(s)}" ${pre.includes(s) ? 'checked' : ''}>
-            ${avatar(a, 2)}<span><strong>${h(a.name)}</strong><br><small>${h(a.title)}</small></span></label>`;
-        })
-        .join('')}</div>
+      ${stagePicks(pre)}
     </fieldset>
     <label class="check"><input type="checkbox" name="review" checked> Pause for my review after each step</label>
     <button class="btn primary" type="submit">Hand it to the team</button>
@@ -285,7 +422,7 @@ async function viewTask(id) {
 
   return `<a class="back" href="#board">← Board</a>
   <h2>${h(task.title)}</h2>
-  <p><span class="status ${task.status}">${h(STATUS_LABEL[task.status])}</span> <span class="muted">Task #${task.id} · spent $${task.costUsd.toFixed(3)}</span></p>
+  <p><span class="status ${task.status}">${h(STATUS_LABEL[task.status])}</span> ${task.routine_id ? '<a class="muted" href="#routines">🔁 from a routine</a> · ' : ''}<span class="muted">Task #${task.id} · spent $${task.costUsd.toFixed(3)}</span></p>
   ${pipeline(task)}
   ${task.brief ? `<div class="brief">${renderMarkdown(task.brief)}</div>` : ''}
   ${task.error ? `<p class="error">${h(task.error)}</p>` : ''}
@@ -339,6 +476,7 @@ async function render() {
   const reviewCount = [...state.tasks.values()].filter((t) => t.status === 'review').length;
   $('#inboxCount').textContent = reviewCount || '';
   if (r.name === 'new' && viewEl.querySelector('#newTask') && viewEl.dataset.route === location.hash) return; // don't wipe a half-typed form
+  if (r.name === 'routines' && r.id && viewEl.querySelector('#routineForm') && viewEl.dataset.route === location.hash) return;
   // keep a half-typed feedback note across live refreshes
   const draft = viewEl.querySelector('#feedback')?.value;
   const draftOpen = viewEl.querySelector('details.changes')?.open;
@@ -348,6 +486,7 @@ async function render() {
     else if (r.name === 'agent') html = await viewAgent(r.id);
     else if (r.name === 'inbox') html = viewInbox();
     else if (r.name === 'new') html = viewNew(r.id);
+    else if (r.name === 'routines') html = r.id ? viewRoutineForm(r.id) : viewRoutines();
     else html = viewBoard();
   } catch (e) {
     html = `<a class="back" href="#board">← Board</a><p class="error">${h(e.message)}</p>`;
@@ -357,6 +496,7 @@ async function render() {
   const sameView = viewEl.dataset.route === location.hash;
   viewEl.innerHTML = html;
   viewEl.dataset.route = location.hash;
+  if (viewEl.querySelector('#routineForm')) updateSchedulePreview();
   if (draft !== undefined && viewEl.querySelector('#feedback')) {
     viewEl.querySelector('#feedback').value = draft;
     if (draftOpen) viewEl.querySelector('details.changes').open = true;
@@ -467,6 +607,22 @@ renderNotifyButton();
 // ---------- actions ----------
 
 viewEl.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'routineForm') return;
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const stages = f.getAll('stages');
+  if (!stages.length) return toast('Pick at least one teammate.');
+  const body = { name: f.get('name'), title: f.get('title'), brief: f.get('brief'), stages, review: f.get('review') === 'on', schedule: f.get('schedule') };
+  const id = e.target.dataset.id;
+  try {
+    await api(id ? `/api/routines/${id}` : '/api/routines', body);
+    go('routines');
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+viewEl.addEventListener('submit', async (e) => {
   if (e.target.id !== 'newTask') return;
   e.preventDefault();
   const f = new FormData(e.target);
@@ -481,8 +637,32 @@ viewEl.addEventListener('submit', async (e) => {
 });
 
 viewEl.addEventListener('click', async (e) => {
+  const chip = e.target.closest('.chip-btn');
+  if (chip) {
+    viewEl.querySelector('#routineForm input[name=schedule]').value = chip.dataset.cron;
+    updateSchedulePreview();
+    return;
+  }
   const b = e.target.closest('[data-action]');
   if (!b) return;
+  if (b.dataset.action.startsWith('routine-')) {
+    const rid = b.dataset.id;
+    try {
+      if (b.dataset.action === 'routine-run') {
+        const r = await api(`/api/routines/${rid}/run`, {});
+        toast(`Created task #${r.last_task_id}`);
+      }
+      if (b.dataset.action === 'routine-toggle') await api(`/api/routines/${rid}`, { enabled: b.dataset.enabled !== 'true' });
+      if (b.dataset.action === 'routine-remove' && confirm('Remove this routine? Tasks it already created stay.')) await api(`/api/routines/${rid}/remove`, {});
+      if (b.dataset.action === 'routine-template') {
+        pendingTemplate = TEMPLATES[Number(b.dataset.index)];
+        go('routines/new');
+      }
+    } catch (err) {
+      toast(err.message);
+    }
+    return;
+  }
   const id = route().id;
   try {
     if (b.dataset.action === 'approve') await api(`/api/tasks/${id}/approve`, {});
