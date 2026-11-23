@@ -117,6 +117,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
     // A running agent may still be writing; its run cleans up the worktree once it stops.
     if (!running) cleanupWorktree(task.id);
     emitTask(task.id);
+    settled(task.id);
   }
 
   function stopAgent(agentId) {
@@ -150,6 +151,8 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
       activity: db.activityForTask(task.id),
       diff: task.branch ? branchDiff(ws, task.branch) : null,
       parent: task.parent_id ? withMeta(db.getTask(task.parent_id)) : null,
+      blockers: db.blockersOf(task.id).map(withMeta),
+      blocking: db.blockedBy(task.id).map(withMeta),
       children: db.childrenOf(task.id).map(withMeta),
     };
   }
@@ -197,6 +200,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
       return;
     }
     fireDueRoutines();
+    finishUnblocked();
     for (const agent of agents) {
       if (live.get(agent.id).status !== 'idle') continue;
       const task = db.nextQueuedFor(agent.stage);
@@ -336,9 +340,14 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
   function advance(task, why) {
     const isLast = task.stage_index >= task.stages.length - 1;
     if (isLast) {
-      db.updateTask(task.id, { status: 'done', assignee: null });
-      record({ taskId: task.id, kind: 'system', text: `${why}. Task done` });
-      cleanupWorktree(task.id);
+      const open = db.openBlockerIds(task.id);
+      if (open.length) {
+        db.updateTask(task.id, { status: 'waiting', assignee: null });
+        record({ taskId: task.id, kind: 'system', text: `${why}. Waiting for ${open.map((id) => `#${id}`).join(', ')} before it can finish` });
+      } else {
+        finish(task.id, `${why}. Task done`);
+        return;
+      }
     } else {
       const from = task.stages[task.stage_index];
       const to = task.stages[task.stage_index + 1];
@@ -471,6 +480,66 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
     bus.publish('routines', { routines: listRoutines() });
   }
 
+  // ---------- blocking relations ----------
+  //
+  // "A is blocked by B" means A won't start its next stage, and won't finish, until B is
+  // done. The scheduler skips blocked tasks (see db.nextQueuedFor). Approving the last
+  // stage of a blocked task parks it in "waiting"; it finishes on its own once the last
+  // blocker is resolved. Cancelled/dismissed blockers stop counting; failed ones still
+  // block (retry or cancel them). Cycles are rejected up front. Paperclip: "blocked by".
+
+  function addBlocker(taskId, blockerId) {
+    const task = mustGet(taskId);
+    const blocker = mustGet(blockerId);
+    if (task.id === blocker.id) throw httpError(400, 'A task cannot wait for itself');
+    if (['done', 'cancelled', 'dismissed'].includes(task.status)) throw httpError(409, 'This task is already finished');
+    if (db.wouldCycle(task.id, blocker.id)) throw httpError(400, `That would be a loop: #${blocker.id} already waits for #${task.id}`);
+    db.addBlocker(task.id, blocker.id);
+    record({ taskId: task.id, kind: 'system', text: `Now waits for #${blocker.id} "${blocker.title}"` });
+    emitTask(task.id);
+    return withMeta(db.getTask(task.id));
+  }
+
+  function removeBlocker(taskId, blockerId) {
+    const task = mustGet(taskId);
+    if (db.removeBlocker(task.id, Number(blockerId))) {
+      record({ taskId: task.id, kind: 'system', text: `No longer waits for #${blockerId}` });
+      emitTask(task.id);
+      finishUnblocked();
+      wake();
+    }
+    return withMeta(db.getTask(task.id));
+  }
+
+  // A task reached done/cancelled/dismissed: tell the tasks it was blocking.
+  function settled(taskId) {
+    const t = db.getTask(taskId);
+    for (const dependent of db.blockedBy(taskId)) {
+      if (t.status !== 'done') {
+        record({ taskId: dependent.id, kind: 'system', text: `#${t.id} was ${t.status}, so it no longer blocks this task` });
+      }
+      emitTask(dependent.id);
+    }
+    finishUnblocked();
+    wake();
+  }
+
+  function finish(taskId, text) {
+    db.updateTask(taskId, { status: 'done', assignee: null });
+    record({ taskId, kind: 'system', text });
+    cleanupWorktree(taskId);
+    emitTask(taskId);
+    settled(taskId); // finishing may unblock others, which may finish... (a chain)
+  }
+
+  function finishUnblocked() {
+    for (const t of db.waitingTasks()) {
+      // Re-read: finishing an earlier task in this loop may already have finished this one.
+      if (db.getTask(t.id).status !== 'waiting') continue;
+      if (!db.openBlockerIds(t.id).length) finish(t.id, 'Everything it was waiting for is done. Task done');
+    }
+  }
+
   // ---------- delegation (sub-tasks) ----------
   //
   // Agents propose, you approve. A proposal is an ordinary task with status "proposed",
@@ -503,6 +572,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
         status: auto ? 'queued' : 'proposed',
       });
       record({ taskId: child.id, agentId: agent.id, kind: 'system', text: `Proposed as a sub-task of #${parent.id} "${parent.title}"` });
+      if (auto) parentWaitsFor(child);
       emitTask(child.id);
     }
     record({
@@ -519,8 +589,19 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
     if (!['proposed', 'dismissed'].includes(task.status)) throw httpError(409, 'Only proposed sub-tasks can be accepted');
     db.updateTask(task.id, { status: 'queued' });
     record({ taskId: task.id, kind: 'system', text: 'You accepted this sub-task' });
+    parentWaitsFor(task);
     emitTask(task.id);
     wake();
+  }
+
+  // An accepted sub-task blocks its parent (unless the parent is already finished).
+  function parentWaitsFor(child) {
+    if (!ws.config.parentWaitsForSubtasks || !child.parent_id) return;
+    const parent = db.getTask(child.parent_id);
+    if (!parent || ['done', 'cancelled', 'dismissed'].includes(parent.status)) return;
+    db.addBlocker(parent.id, child.id);
+    record({ taskId: parent.id, kind: 'system', text: `Now waits for sub-task #${child.id} "${child.title}" before it can finish` });
+    emitTask(parent.id);
   }
 
   function dismissSubtask(taskId) {
@@ -529,6 +610,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
     db.updateTask(task.id, { status: 'dismissed' });
     record({ taskId: task.id, kind: 'system', text: 'You dismissed this sub-task' });
     emitTask(task.id);
+    settled(task.id);
   }
 
   function acceptAllSubtasks(parentId) {
@@ -603,7 +685,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
   }
 
   function withMeta(task) {
-    return { ...task, stage: task.stages[task.stage_index], costUsd: db.taskSpend(task.id) };
+    return { ...task, stage: task.stages[task.stage_index], costUsd: db.taskSpend(task.id), blockedBy: db.openBlockerIds(task.id) };
   }
 
   function officeState() {
@@ -628,7 +710,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
   return {
     snapshot, createTask, approve, requestChanges, retry, cancel, stopAgent, setPaused,
     taskDetail, agentDetail, taskFile, start, stop,
-    acceptSubtask, dismissSubtask, acceptAllSubtasks,
+    acceptSubtask, dismissSubtask, acceptAllSubtasks, addBlocker, removeBlocker,
     listRoutines, createRoutine, updateRoutine, removeRoutine, runRoutineNow, schedulePreview,
     tick: heartbeat, // run one heartbeat right now (used by tests)
   };

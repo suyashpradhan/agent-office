@@ -33,11 +33,15 @@ and the agents (Claude Code processes) only do the work.
 
 ```
 proposed ──accept──▶ queued ──checkout──▶ running ──ok──▶ review ──approve──▶ queued (next stage) ─ … ─▶ done
-    │                                        │                └──request changes──▶ queued (same stage, resumes session)
-    └──dismiss──▶ dismissed                  └──error──▶ failed ──retry──▶ queued
+    │                  ▲                     │                │                                          ▲
+    └──dismiss──▶ dismissed                  │                ├──request changes──▶ queued (same stage)  │
+                       │                     │                └──approve last stage, blockers open──▶ waiting
+                  checkout skips it          └──error──▶ failed ──retry──▶ queued      (finishes when they're done)
+                  while it has open blockers
 ```
 
-`proposed` only exists for sub-tasks an agent suggested (see Delegation below).
+`proposed` only exists for sub-tasks an agent suggested (see Delegation below). `waiting`
+only exists for tasks with open blockers (see Blocking below).
 
 1. **You create a task** (`POST /api/tasks`) with stages, e.g. `research → design → dev`.
 2. **Heartbeat** (every 2s, plus right away after any change) looks for an idle agent whose
@@ -69,7 +73,15 @@ proposed ──accept──▶ queued ──checkout──▶ running ──ok�
     task with `status='proposed'`, `parent_id`, `depth+1` and `proposed_by`. The heartbeat only
     takes `queued` tasks, so proposals wait for you. When you accept one, its prompt includes
     the parent's brief and the deliverable it came from. That's how context flows down.
-12. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
+12. **Blocking**: `task_blockers` holds "A is blocked by B" links. `db.nextQueuedFor()` skips
+    any queued task with an open blocker (one `NOT EXISTS` subquery), so a blocked task never
+    starts its next stage. Approving the last stage while blockers are open moves the task to
+    `waiting`. Whenever a task reaches done, cancelled or dismissed, `settled()` checks what it
+    was blocking, and `finishUnblocked()` (also run on every heartbeat as a safety net)
+    finishes waiting tasks whose blockers are all resolved. Done, cancelled and dismissed
+    resolve a blocker. Failed does not. `wouldCycle()` walks the links before adding one, so
+    loops are impossible. Accepting a sub-task links its parent to it.
+13. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
    office pauses.
 
 ## Why each piece exists (and its Paperclip equivalent)
@@ -86,6 +98,7 @@ proposed ──accept──▶ queued ──checkout──▶ running ──ok�
 | Agent `.md` files (tools, workspace) | Least privilege per role | org chart, permissions, governance |
 | Adapter interface | Swap Claude for Codex, Gemini, a mock… | `packages/adapters/*` |
 | `routines` + `schedule.js` | Recurring work without you remembering to start it | routines, scheduled triggers |
+| `task_blockers`, `waiting` status | "Don't start or finish until X is done" | "blocked by" relations between issues |
 | `delegation.js`, `parent_id`, `proposed` status | Work flows down the team, with a human gate | delegation down the org chart, approvals |
 | `hasColumn` migrations in `db.js` | Old projects' databases keep working after upgrades | `packages/db` migrations |
 | Worktree per dev task | Agents never touch your working copy | execution workspaces |
@@ -97,11 +110,8 @@ proposed ──accept──▶ queued ──checkout──▶ running ──ok�
 Paperclip is built for many companies, many humans and agents running unattended around the
 clock. To keep this project readable, we skipped multi-tenancy and auth, agents delegating to
 other agents (an org hierarchy), goals and projects above tasks, skills management,
-secrets/connectors, and plugins. (Routines and delegation started on this list and are now
-built; see above.) Each of the rest would be a reasonable next exercise:
-
-- **Blocking relations**: let a parent wait until its sub-tasks are done (Paperclip has
-  "blocked by" links between issues).
+secrets/connectors, and plugins. (Routines, delegation and blocking started on this list and
+are now built; see above.) Each of the rest would be a reasonable next exercise:
 - **Another runtime**: copy `adapters/claude.js` into `adapters/codex.js` and pick it per agent.
 
 ## Security notes

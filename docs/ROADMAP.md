@@ -25,7 +25,10 @@
   `proposed` tasks with a parent, start only when you accept, and get the parent's context.
   Guardrails: depth limit, per-run cap, reruns replace old proposals, cancel withdraws them.
   Paperclip: delegation down the org chart + approvals.
-- **Blocking**: a parent waits for its sub-tasks ("blocked by" links).
+- [x] **Blocking**: "blocked by" links. A blocked task doesn't start its next stage or finish.
+  Approving early parks it in `waiting` until its blockers are done. Accepted sub-tasks block
+  their parent, manual links can be added on any task page, and cycles are refused.
+  Paperclip: "blocked by" relations between issues.
 - **A second runtime**: a Codex or Gemini CLI adapter selected per agent (`runtime: codex`).
   Paperclip: `packages/adapters/*`.
 - **Skills**: shared instruction files injected into an agent's prompt at runtime.

@@ -57,7 +57,8 @@ agent-office --mock
   "runTimeoutMinutes": 30,
   "maxDelegationDepth": 1,
   "maxSubtasksPerRun": 3,
-  "autoApproveSubtasks": false
+  "autoApproveSubtasks": false,
+  "parentWaitsForSubtasks": true
 }
 ```
 
@@ -126,6 +127,19 @@ Guardrails, all in `.office/config.json`:
 - When an agent reruns after you request changes, its new proposals replace its old ones.
 - Cancelling a task withdraws its pending proposals.
 - Add `delegate: false` to an agent's file to stop it proposing.
+
+## Blocking ("wait for")
+
+A task can wait for other tasks. While any of them is unfinished, it won't start its next step
+and it won't finish. If you approve its last step early, it shows **Waiting on others** and
+completes on its own once the last blocker is done.
+
+- **Sub-tasks:** accepting a sub-task makes its parent wait for it (`"parentWaitsForSubtasks": true`).
+  Dismissed proposals never block.
+- **Manual:** on any task page, pick another task under *Dependencies → Wait for another task*,
+  or remove a link with ✕.
+- **Edge cases:** a cancelled or dismissed blocker stops blocking. A failed one keeps blocking
+  until you retry or cancel it. Loops (A waits for B, B waits for A) are refused.
 
 ## Routines (scheduled work)
 

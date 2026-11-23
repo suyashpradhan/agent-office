@@ -33,6 +33,8 @@ const DEFAULT_CONFIG = {
   maxSubtasksPerRun: 3,
   // Start proposed sub-tasks without asking you first. Off by default on purpose.
   autoApproveSubtasks: false,
+  // An accepted sub-task blocks its parent: the parent can't finish until it's done.
+  parentWaitsForSubtasks: true,
 };
 
 export function openWorkspace(repoArg) {

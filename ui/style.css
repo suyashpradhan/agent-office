@@ -293,3 +293,17 @@ details.code summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .subtask-actions { display: flex; gap: 6px; flex: none; }
 .subtask-actions .btn { padding: 4px 10px; font-size: 13px; }
 .small { font-size: 12px; }
+
+/* ---------- blocking relations ---------- */
+.blocked-note { display: block; font-size: 12px; color: var(--danger); margin: 0 0 4px; }
+.status.waiting { color: #8a5a00; border-color: #e8c77a; }
+.deps { margin: 14px 0; }
+.dep-note { font-size: 14px; background: color-mix(in srgb, var(--warn) 12%, transparent); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+.dep-label { font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+.dep-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.dep-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 14px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.dep-list li.resolved { opacity: 0.65; }
+.btn.icon { padding: 2px 8px; font-size: 12px; }
+.dep-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.dep-add label { width: 100%; font-size: 13px; }
+.dep-add select { flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }

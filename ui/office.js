@@ -609,7 +609,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
     px(x, y, w, h, '#fbfbf7');
     px(x + 2, y + h, w - 4, 3, '#b5bcc4');
     const cols = [
-      { color: '#f2c94c', filter: (k) => k.status === 'queued' },
+      { color: '#f2c94c', filter: (k) => k.status === 'queued' || k.status === 'waiting' },
       { color: '#56a0f5', filter: (k) => k.status === 'running' },
       { color: '#f2994a', filter: (k) => k.status === 'review' || k.status === 'failed' || k.status === 'proposed' },
     ];
@@ -627,6 +627,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
         px(nx, ny, 7, 7, color);
         px(nx, ny, 7, 1, shade(color, -0.15));
         px(nx + 1, ny + 3, 4, 1, 'rgba(0,0,0,0.25)');
+        if (task.status === 'waiting' || task.blockedBy?.length) px(nx + 5, ny - 1, 2, 2, '#d64545'); // red pin: blocked
       });
     });
   }

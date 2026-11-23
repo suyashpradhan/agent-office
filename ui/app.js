@@ -192,6 +192,7 @@ const STATUS_LABEL = {
   done: 'Done',
   failed: 'Failed',
   cancelled: 'Cancelled',
+  waiting: 'Waiting on others',
   dismissed: 'Dismissed',
 };
 const needsYou = (t) => t.status === 'review' || t.status === 'failed' || t.status === 'proposed';
@@ -217,6 +218,7 @@ function card(task) {
   const proposer = agentById(task.proposed_by);
   return `<a class="card ${task.status === 'proposed' ? 'proposed' : ''}" href="#task/${task.id}" style="--agent:${h(a?.color || '#999')}">
     <span class="card-title">${task.routine_id ? '<span title="Created by a routine" aria-label="Created by a routine">🔁</span> ' : ''}${h(task.title)}</span>
+    ${task.blockedBy?.length ? `<small class="blocked-note">⛔ Waiting for ${task.blockedBy.map((id) => `#${id}`).join(', ')}</small>` : ''}
     ${task.parent_id ? `<small class="lineage">↳ ${task.status === 'proposed' && proposer ? `💡 ${h(proposer.name)}'s idea, ` : ''}sub-task of ${parent ? `“${h(parent.title)}”` : `#${task.parent_id}`}</small>` : ''}
     <span class="status ${task.status}">${h(STATUS_LABEL[task.status] || task.status)}</span>
     ${pipeline(task)}
@@ -238,7 +240,8 @@ function viewBoard() {
   return [
     group('Working', all.filter((t) => t.status === 'running'), 'Nobody is working right now.'),
     group('Needs you', all.filter(needsYou), 'Nothing waiting for you.'),
-    group('Queued', all.filter((t) => t.status === 'queued'), 'The queue is empty.'),
+    group('Waiting', all.filter((t) => t.status === 'waiting' || (t.status === 'queued' && t.blockedBy?.length)), 'Nothing is blocked.'),
+    group('Queued', all.filter((t) => t.status === 'queued' && !t.blockedBy?.length), 'The queue is empty.'),
     group('Finished', all.filter((t) => t.status === 'done' || t.status === 'cancelled').slice(0, 12), 'Nothing finished yet.'),
   ].join('');
 }
@@ -408,7 +411,7 @@ async function viewTask(id) {
     d = await api(`/api/tasks/${id}`);
     detailCache.set(Number(id), d);
   }
-  const { task, outputs, activity, diff, parent, children } = d;
+  const { task, outputs, activity, diff, parent, children, blockers, blocking } = d;
   const next = agentForStage(task.stages[task.stage_index + 1]);
   const actions = [];
   if (task.status === 'proposed') {
@@ -423,7 +426,7 @@ async function viewTask(id) {
       <button class="btn" data-action="changes">Send back</button></details>`);
   }
   if (task.status === 'failed' || task.status === 'cancelled') actions.push(`<button class="btn primary" data-action="retry">Retry</button>`);
-  if (['queued', 'running', 'review', 'failed'].includes(task.status)) actions.push(`<button class="btn danger" data-action="cancel">Cancel task</button>`);
+  if (['queued', 'running', 'review', 'failed', 'waiting'].includes(task.status)) actions.push(`<button class="btn danger" data-action="cancel">Cancel task</button>`);
 
   const deliverables = task.stages
     .filter((s) => outputs[s])
@@ -449,6 +452,7 @@ async function viewTask(id) {
   ${task.error ? `<p class="error">${h(task.error)}</p>` : ''}
   ${actions.length ? `<div class="actions">${actions.join('')}</div>` : ''}
   ${children.length ? subtaskList(children) : ''}
+  ${dependencies(task, blockers, blocking)}
   ${task.branch ? codeChanges(task, diff) : ''}
   ${deliverables || `<p class="empty">${task.status === 'proposed' ? 'Nothing runs until you accept it.' : 'No deliverables yet.'}</p>`}
   <h3>Activity</h3>
@@ -530,6 +534,37 @@ async function render() {
   }
   const reviews = [...state.tasks.values()].filter((t) => t.status === 'review' || t.status === 'proposed').length;
   document.title = `${reviews ? `(${reviews}) ` : ''}Agent Office${state.project.name ? ` · ${state.project.name}` : ''}`;
+}
+
+// ---------- blocking relations ----------
+
+const FINISHED = ['done', 'cancelled', 'dismissed'];
+
+function dependencies(task, blockers, blocking) {
+  const finished = FINISHED.includes(task.status);
+  if (finished && !blockers.length && !blocking.length) return '';
+  const open = blockers.filter((b) => !FINISHED.includes(b.status));
+  const ids = open.map((b) => `#${b.id}`).join(', ');
+  let note = '';
+  if (task.status === 'waiting') note = `Approved. It finishes on its own once ${ids} ${open.length > 1 ? 'are' : 'is'} done.`;
+  else if (open.length && !finished) note = `Won't start its next step or finish until ${ids} ${open.length > 1 ? 'are' : 'is'} done.`;
+  const row = (t, removable) => `<li class="${FINISHED.includes(t.status) ? 'resolved' : ''}">
+      <span><a href="#task/${t.id}">#${t.id} ${h(t.title)}</a> <span class="status ${t.status}">${h(STATUS_LABEL[t.status] || t.status)}</span></span>
+      ${removable && !finished ? `<button class="btn icon" data-action="blocker-remove" data-id="${t.id}" title="Stop waiting for #${t.id}" aria-label="Stop waiting for #${t.id}">✕</button>` : ''}
+    </li>`;
+  const candidates = [...state.tasks.values()].filter(
+    (t) => t.id !== task.id && !FINISHED.includes(t.status) && !blockers.some((b) => b.id === t.id),
+  );
+  return `<section class="deps">
+    <h3>Dependencies</h3>
+    ${note ? `<p class="dep-note">⛔ ${note}</p>` : ''}
+    ${blockers.length ? `<p class="dep-label">Waits for</p><ul class="dep-list">${blockers.map((b) => row(b, true)).join('')}</ul>` : ''}
+    ${blocking.length ? `<p class="dep-label">Blocks</p><ul class="dep-list">${blocking.map((b) => row(b, false)).join('')}</ul>` : ''}
+    ${!finished && candidates.length ? `<div class="dep-add">
+      <label for="blockerPick" class="muted">Wait for another task</label>
+      <select id="blockerPick">${candidates.map((t) => `<option value="${t.id}">#${t.id} ${h(t.title.slice(0, 60))}</option>`).join('')}</select>
+      <button class="btn" data-action="blocker-add">Add</button></div>` : ''}
+  </section>`;
 }
 
 // ---------- delegation ----------
@@ -692,6 +727,17 @@ viewEl.addEventListener('click', async (e) => {
   }
   const b = e.target.closest('[data-action]');
   if (!b) return;
+  if (b.dataset.action.startsWith('blocker-')) {
+    try {
+      if (b.dataset.action === 'blocker-add') {
+        await api(`/api/tasks/${route().id}/blockers`, { blockerId: Number(viewEl.querySelector('#blockerPick').value) });
+      }
+      if (b.dataset.action === 'blocker-remove') await api(`/api/tasks/${route().id}/blockers/${b.dataset.id}/remove`, {});
+    } catch (err) {
+      toast(err.message);
+    }
+    return;
+  }
   if (b.dataset.action.startsWith('subtask-')) {
     try {
       if (b.dataset.action === 'subtask-accept') await api(`/api/tasks/${b.dataset.id}/accept`, {});

@@ -10,6 +10,8 @@
 //   POST /api/tasks/:id/retry
 //   POST /api/tasks/:id/cancel
 //   GET  /api/tasks/:id/files/:name a deliverable file (e.g. the designer's mockup)
+//   POST /api/tasks/:id/blockers    { blockerId }: this task waits for that one
+//   POST /api/tasks/:id/blockers/:blockerId/remove
 //   POST /api/tasks/:id/accept      start a proposed sub-task
 //   POST /api/tasks/:id/dismiss     turn a proposed sub-task down
 //   POST /api/tasks/:id/accept-subtasks   accept all of a task's pending proposals
@@ -40,6 +42,8 @@ export function createServer({ orch, bus }) {
     ['POST', /^\/api\/tasks\/(\d+)\/changes$/, ([id], body) => orch.requestChanges(id, body.feedback)],
     ['POST', /^\/api\/tasks\/(\d+)\/retry$/, ([id]) => orch.retry(id)],
     ['POST', /^\/api\/tasks\/(\d+)\/cancel$/, ([id]) => orch.cancel(id)],
+    ['POST', /^\/api\/tasks\/(\d+)\/blockers$/, ([id], body) => orch.addBlocker(id, body.blockerId)],
+    ['POST', /^\/api\/tasks\/(\d+)\/blockers\/(\d+)\/remove$/, ([id, blockerId]) => orch.removeBlocker(id, blockerId)],
     ['POST', /^\/api\/tasks\/(\d+)\/accept$/, ([id]) => orch.acceptSubtask(id)],
     ['POST', /^\/api\/tasks\/(\d+)\/dismiss$/, ([id]) => orch.dismissSubtask(id)],
     ['POST', /^\/api\/tasks\/(\d+)\/accept-subtasks$/, ([id]) => orch.acceptAllSubtasks(id)],

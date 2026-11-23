@@ -12,6 +12,11 @@
 
 import { DatabaseSync } from 'node:sqlite';
 
+// Statuses that no longer block anyone. A failed blocker still blocks: retry or cancel it.
+const RESOLVED = `'done', 'cancelled', 'dismissed'`;
+const OPEN_BLOCKER_SQL = `SELECT 1 FROM task_blockers b JOIN tasks x ON x.id = b.blocker_id
+  WHERE b.task_id = t.id AND x.status NOT IN (${RESOLVED})`;
+
 export function openDb(file) {
   const db = new DatabaseSync(file);
   db.exec(`
@@ -22,7 +27,7 @@ export function openDb(file) {
       brief       TEXT NOT NULL DEFAULT '',
       stages      TEXT NOT NULL,              -- JSON array, e.g. ["research","design","dev"]
       stage_index INTEGER NOT NULL DEFAULT 0, -- which stage we're on
-      status      TEXT NOT NULL,              -- proposed | queued | running | review | done | failed | cancelled | dismissed
+      status      TEXT NOT NULL,              -- proposed | queued | running | review | waiting | done | failed | cancelled | dismissed
       assignee    TEXT,                       -- agent id currently holding the task
       review      INTEGER NOT NULL DEFAULT 1, -- pause for approval between stages?
       feedback    TEXT,                       -- your "request changes" note, consumed by the next run
@@ -58,6 +63,14 @@ export function openDb(file) {
       last_task_id INTEGER,
       last_result  TEXT,                       -- "Created task #4" / "Skipped: ..."
       created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- "task_id is blocked by blocker_id": the task can't start its next stage or finish
+    -- until the blocker is done. Paperclip: "blocked by" relations between issues.
+    CREATE TABLE IF NOT EXISTS task_blockers (
+      task_id    INTEGER NOT NULL,
+      blocker_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (task_id, blocker_id)
     );
     CREATE TABLE IF NOT EXISTS activity (
       id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,9 +124,47 @@ export function openDb(file) {
     },
 
     // Oldest queued task whose *current* stage is the given one.
+    // Oldest queued task for this stage that nothing is blocking.
     nextQueuedFor(stage) {
-      const rows = q(`SELECT * FROM tasks WHERE status = 'queued' ORDER BY id`).all().map(parseTask);
+      const rows = q(
+        `SELECT * FROM tasks t WHERE t.status = 'queued' AND NOT EXISTS (${OPEN_BLOCKER_SQL}) ORDER BY t.id`,
+      ).all().map(parseTask);
       return rows.find((t) => t.stages[t.stage_index] === stage) ?? null;
+    },
+
+    // ---- blockers ----
+    addBlocker(taskId, blockerId) {
+      q(`INSERT OR IGNORE INTO task_blockers (task_id, blocker_id) VALUES (?, ?)`).run(taskId, blockerId);
+    },
+    removeBlocker(taskId, blockerId) {
+      return q(`DELETE FROM task_blockers WHERE task_id = ? AND blocker_id = ?`).run(taskId, blockerId).changes === 1;
+    },
+    blockersOf(taskId) {
+      return q(`SELECT t.* FROM task_blockers b JOIN tasks t ON t.id = b.blocker_id WHERE b.task_id = ? ORDER BY t.id`).all(taskId).map(parseTask);
+    },
+    blockedBy(blockerId) {
+      return q(`SELECT t.* FROM task_blockers b JOIN tasks t ON t.id = b.task_id WHERE b.blocker_id = ? ORDER BY t.id`).all(blockerId).map(parseTask);
+    },
+    // Blockers that still count: anything not done, cancelled or dismissed (failed still blocks).
+    openBlockerIds(taskId) {
+      return q(`SELECT x.id FROM task_blockers b JOIN tasks x ON x.id = b.blocker_id
+                WHERE b.task_id = ? AND x.status NOT IN (${RESOLVED})`).all(taskId).map((r) => r.id);
+    },
+    // Would "taskId is blocked by blockerId" create a cycle? (Is taskId already upstream of blockerId?)
+    wouldCycle(taskId, blockerId) {
+      const seen = new Set();
+      const stack = [blockerId];
+      while (stack.length) {
+        const id = stack.pop();
+        if (id === taskId) return true;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        for (const r of q(`SELECT blocker_id FROM task_blockers WHERE task_id = ?`).all(id)) stack.push(r.blocker_id);
+      }
+      return false;
+    },
+    waitingTasks() {
+      return q(`SELECT * FROM tasks WHERE status = 'waiting' ORDER BY id`).all().map(parseTask);
     },
 
     // ATOMIC CHECKOUT - the most important line in the scheduler.
