@@ -1,0 +1,25 @@
+{
+  "name": "agent-office",
+  "version": "0.1.0",
+  "description": "A tiny, readable multi-agent orchestrator (Researcher -> Designer -> Developer) with a 2D office dashboard. Built to learn how control planes like Paperclip work.",
+  "type": "module",
+  "bin": {
+    "agent-office": "bin/agent-office.js"
+  },
+  "scripts": {
+    "start": "node bin/agent-office.js",
+    "demo": "node bin/agent-office.js --mock",
+    "test": "node --test --test-concurrency=1"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src",
+    "agents",
+    "ui",
+    "docs"
+  ]
+}

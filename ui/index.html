@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Office</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%234c8bf5'/><rect x='3' y='4' width='4' height='4' fill='%23fff'/><rect x='9' y='4' width='4' height='4' fill='%23fff'/><rect x='3' y='10' width='10' height='2' fill='%23fff'/></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span>Agent Office</div>
+    <div id="project" class="project"></div>
+    <span id="mockBadge" class="badge" hidden title="Simulated agents: no Claude calls, no cost">mock mode</span>
+    <div class="spacer"></div>
+    <div class="budget" title="Total spent on this project vs. the budget in .office/config.json">
+      <span id="budgetText">$0.00</span>
+      <span class="bar"><span id="budgetBar"></span></span>
+    </div>
+    <button id="pauseBtn" class="btn">Pause office</button>
+  </header>
+
+  <main class="layout">
+    <section class="stage-col">
+      <div class="stage">
+        <canvas id="office" aria-label="2D office where the agents work. Click an agent, the task board, the door, or your inbox."></canvas>
+        <div id="overlay" class="overlay"><div id="plaque" class="plaque"></div></div>
+        <div id="pausedBanner" class="paused-banner" hidden></div>
+        <div id="conn" class="conn" hidden>Reconnecting to the office…</div>
+      </div>
+      <p class="hint muted">Click an agent to see what they're doing. Click the <strong>door</strong> to hand out work, the <strong>whiteboard</strong> for the task board, and <strong>your desk</strong> for your inbox. The coffee machine and the arcade work too.</p>
+      <div id="roster" class="roster"></div>
+    </section>
+
+    <aside class="panel">
+      <nav class="tabs">
+        <a href="#board">Board</a>
+        <a href="#inbox">Inbox <span id="inboxCount" class="count-badge"></span></a>
+        <a href="#new">+ New work</a>
+      </nav>
+      <div id="view" class="view"></div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
