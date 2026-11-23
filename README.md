@@ -11,7 +11,7 @@ each deliverable in your inbox tray. You approve it to pass it to the next teamm
 
 It's a small, readable take on the architecture behind
 [Paperclip](https://github.com/paperclipai/paperclip): a control plane that runs Claude Code
-agents with tasks, handoffs, approvals, budgets and live events. About 1,000 lines of
+agents with tasks, handoffs, approvals, budgets and live events. About 1,200 lines of
 backend, zero dependencies. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Prerequisites
