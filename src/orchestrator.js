@@ -16,7 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensureWorktree, diffStat } from './workspace.js';
+import { ensureWorktree, branchDiff, commitLeftovers, commitsAhead, removeWorktree, pruneWorktrees } from './workspace.js';
 
 export function createOrchestrator({ ws, db, agents, adapter, bus }) {
   const byStage = new Map(agents.map((a) => [a.stage, a]));
@@ -30,6 +30,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
 
   const recovered = db.recoverInterrupted();
   if (recovered) db.log({ kind: 'system', text: `Recovered ${recovered} task(s) interrupted by a restart` });
+  pruneWorktrees(ws);
 
   // ---------- public API ----------
 
@@ -92,9 +93,17 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
   function cancel(taskId) {
     const task = mustGet(taskId);
     if (['done', 'cancelled'].includes(task.status)) return;
-    for (const [runId, ctl] of controllers) if (db.getRun(runId)?.task_id === task.id) ctl.abort();
+    let running = false;
+    for (const [runId, ctl] of controllers) {
+      if (db.getRun(runId)?.task_id === task.id) {
+        running = true;
+        ctl.abort();
+      }
+    }
     db.updateTask(task.id, { status: 'cancelled', assignee: null });
     record({ taskId: task.id, kind: 'system', text: 'Cancelled' });
+    // A running agent may still be writing; its run cleans up the worktree once it stops.
+    if (!running) cleanupWorktree(task.id);
     emitTask(task.id);
   }
 
@@ -127,7 +136,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
       runs: db.runsForTask(task.id),
       outputs,
       activity: db.activityForTask(task.id),
-      diffStat: task.branch ? diffStat(ws, task.branch) : '',
+      diff: task.branch ? branchDiff(ws, task.branch) : null,
     };
   }
 
@@ -196,11 +205,18 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
 
     // Where does this agent work? Read-only roles use your repo; the developer gets a worktree.
     let cwd = ws.repo;
+    let branch = null;
     if (agent.workspace === 'worktree') {
       const wt = ensureWorktree(ws, task.id);
       cwd = wt.cwd;
+      branch = wt.branch;
       if (wt.branch && task.branch !== wt.branch) db.updateTask(task.id, { branch: wt.branch });
     }
+
+    // A run that hangs forever would block this agent forever. Abort it after the limit.
+    const limitMin = Number(ws.config.runTimeoutMinutes) || 0;
+    let timedOut = false;
+    const timeout = limitMin > 0 ? setTimeout(() => ((timedOut = true), ctl.abort()), limitMin * 60_000) : null;
 
     // Resume the previous session for this stage if we have one (rework or crash recovery).
     const resumeSessionId = db.lastSession(task.id, stage);
@@ -220,15 +236,32 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
       },
     });
     controllers.delete(run.id);
+    clearTimeout(timeout);
 
     if (!result.ok) {
+      const error = timedOut ? `Timed out after ${limitMin} min (runTimeoutMinutes in .office/config.json)` : result.error;
       db.finishRun(run.id, {
-        status: ctl.signal.aborted ? 'stopped' : 'failed',
-        error: result.error,
+        status: ctl.signal.aborted && !timedOut ? 'stopped' : 'failed',
+        error,
         cost_usd: result.costUsd ?? 0,
         session_id: result.sessionId ?? null,
       });
-      return finishFailed(agent, task.id, run.id, result.error);
+      if (db.getTask(task.id)?.status === 'cancelled') cleanupWorktree(task.id);
+      return finishFailed(agent, task.id, run.id, error);
+    }
+
+    // Developer safety net: never lose uncommitted edits, and say so if nothing changed.
+    if (branch) {
+      try {
+        if (commitLeftovers(cwd, `office: ${agent.name}'s uncommitted changes for task ${task.id}`)) {
+          record({ taskId: task.id, runId: run.id, agentId: agent.id, kind: 'system', text: `${agent.name} left changes uncommitted; saved them as a commit on ${branch}` });
+        }
+        if (commitsAhead(ws, branch) === 0) {
+          record({ taskId: task.id, runId: run.id, agentId: agent.id, kind: 'error', text: `${agent.name} finished without changing any code on ${branch}` });
+        }
+      } catch (err) {
+        record({ taskId: task.id, runId: run.id, agentId: agent.id, kind: 'error', text: `Could not check the branch: ${err.message}` });
+      }
     }
 
     // Save the deliverable as a handoff document the next agent (and you) can read.
@@ -244,6 +277,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
 
     const fresh = db.getTask(task.id);
     if (fresh.status === 'cancelled') {
+      cleanupWorktree(task.id);
       setLive(agent.id, { status: 'idle', taskId: null, runId: null, activity: '' });
       return;
     }
@@ -276,6 +310,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
     if (isLast) {
       db.updateTask(task.id, { status: 'done', assignee: null });
       record({ taskId: task.id, kind: 'system', text: `${why}. Task done` });
+      cleanupWorktree(task.id);
     } else {
       const from = task.stages[task.stage_index];
       const to = task.stages[task.stage_index + 1];
@@ -309,6 +344,13 @@ export function createOrchestrator({ ws, db, agents, adapter, bus }) {
   }
 
   // ---------- helpers ----------
+
+  function cleanupWorktree(taskId) {
+    const task = db.getTask(taskId);
+    if (task?.branch && removeWorktree(ws, taskId)) {
+      record({ taskId, kind: 'system', text: `Removed the temporary checkout; the work stays on ${task.branch}` });
+    }
+  }
 
   function record(entry) {
     const row = db.log(entry);

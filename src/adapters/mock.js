@@ -3,6 +3,8 @@
 // research -> design -> dev flow, approvals, and handoffs before spending tokens.
 
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // Tests set AGENT_OFFICE_MOCK_SPEED=50 to make the fake work 50x faster.
 const SPEED = Number(process.env.AGENT_OFFICE_MOCK_SPEED || 1);
@@ -37,7 +39,7 @@ const SCRIPTS = {
   ],
 };
 
-export function run({ agent, prompt, resumeSessionId, onActivity, onSession, signal }) {
+export function run({ agent, prompt, cwd, resumeSessionId, onActivity, onSession, signal }) {
   const title = (prompt.match(/^# Task: (.*)$/m)?.[1] ?? 'the task').slice(0, 40);
   const script = SCRIPTS[agent.stage] ?? SCRIPTS.research;
   const sessionId = resumeSessionId || randomUUID();
@@ -53,6 +55,11 @@ export function run({ agent, prompt, resumeSessionId, onActivity, onSession, sig
         onActivity({ kind, text: text(title) });
         timer = setTimeout(step, (1800 + Math.random() * 2200) / SPEED);
         return;
+      }
+      // In a developer worktree, leave a small (uncommitted) change so the diff viewer
+      // and the orchestrator's safety-net commit have something to show.
+      if (agent.workspace === 'worktree' && cwd && cwd.includes(`${path.sep}.office${path.sep}worktrees${path.sep}`)) {
+        fs.appendFileSync(path.join(cwd, 'AGENT_OFFICE_MOCK.md'), `- mock change for: ${title}\n`);
       }
       resolve({ ok: true, sessionId, costUsd: 0, output: fakeOutput(agent.stage, title, !!resumeSessionId) });
     };
@@ -107,10 +114,10 @@ function fakeOutput(stage, title, revised) {
 \`\`\``;
   }
   return `## What changed
-(Mock run) Nothing was actually edited - this is the mock adapter.${note}
+(Mock run) Added a line to AGENT_OFFICE_MOCK.md on this task's branch - this is the mock adapter.${note}
 
 ## Files touched
-- (none)
+- AGENT_OFFICE_MOCK.md
 
 ## How to try it
 Run without --mock to let the real developer agent work on a branch.

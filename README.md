@@ -12,7 +12,7 @@ each deliverable in your inbox tray. You approve it to pass it to the next teamm
 It's a small, readable take on the architecture behind
 [Paperclip](https://github.com/paperclipai/paperclip): a control plane that runs Claude Code
 agents with tasks, handoffs, approvals, budgets and live events. About 1,200 lines of
-backend, zero dependencies. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+backend, zero dependencies. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ agent-office --mock
 `.office/config.json`
 
 ```json
-{ "budgetUsd": 5, "reviewBetweenStages": true, "heartbeatMs": 2000 }
+{ "budgetUsd": 5, "reviewBetweenStages": true, "heartbeatMs": 2000, "runTimeoutMinutes": 30 }
 ```
 
 `.office/agents/*.md` sets each agent's role prompt, tools, workspace, model and budget per run:
@@ -77,7 +77,10 @@ pipeline stage and gets a desk in the office.
 ## Reviewing the developer's work
 
 Byte works in `.office/worktrees/task-<id>` on branch `office/task-<id>`. Your working copy
-is never touched. When you're happy with it:
+is never touched. The task panel shows the branch's changes as a diff. If Byte forgets to commit,
+the orchestrator commits the leftovers for it. If Byte changes nothing, the task says so. When
+the task is done or cancelled, the temporary checkout is removed and the branch is kept.
+When you're happy with it:
 
 ```bash
 git diff main...office/task-3
@@ -94,6 +97,13 @@ git merge office/task-3
 | `agent-office --mock` | simulated agents, no Claude calls |
 | `agent-office init` | just create `.office/` so you can edit agents first |
 | `npm test` | end-to-end tests (mock adapter) |
+
+## Working in the background
+
+Click **Notify me** in the header to get a desktop notification when an agent needs your
+review, a run fails, or a task is done. The browser tab title also shows how many items are
+waiting, e.g. `(2) Agent Office · my-app`. A run that hangs is stopped after
+`runTimeoutMinutes`.
 
 ## Costs
 

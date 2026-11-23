@@ -56,6 +56,7 @@ function handle(evt) {
       if (!prev) office.taskCreated();
       else if (prev.status === 'review' && evt.task.status === 'queued' && evt.task.stage_index > prev.stage_index) office.approvedHandoff();
       if (prev && prev.status !== 'done' && evt.task.status === 'done') office.celebrate();
+      maybeNotify(prev, evt.task);
       invalidate(evt.task.id);
       render();
       break;
@@ -255,12 +256,12 @@ async function viewTask(id) {
     d = await api(`/api/tasks/${id}`);
     detailCache.set(Number(id), d);
   }
-  const { task, outputs, activity, diffStat } = d;
+  const { task, outputs, activity, diff } = d;
   const next = agentForStage(task.stages[task.stage_index + 1]);
   const actions = [];
   if (task.status === 'review') {
     actions.push(`<button class="btn primary" data-action="approve">${next ? `Approve and hand to ${h(next.name)}` : 'Approve and finish'}</button>`);
-    actions.push(`<details class="changes"><summary class="btn">Request changes</summary>
+    actions.push(`<details class="changes" data-key="changes"><summary class="btn">Request changes</summary>
       <textarea id="feedback" rows="3" placeholder="What should ${h(agentForStage(task.stage)?.name)} change?"></textarea>
       <button class="btn" data-action="changes">Send back</button></details>`);
   }
@@ -274,7 +275,7 @@ async function viewTask(id) {
       const a = agentForStage(s);
       const o = outputs[s];
       const mock = o.mockup ? `/api/tasks/${task.id}/files/${o.mockup}` : null;
-      return `<details class="deliverable" ${i === 0 ? 'open' : ''} style="--agent:${h(a?.color)}">
+      return `<details class="deliverable" data-key="out-${h(s)}" ${i === 0 ? 'open' : ''} style="--agent:${h(a?.color)}">
         <summary>${avatar(a, 1)} ${h(a?.name)}'s ${h(a?.title.toLowerCase())} handoff</summary>
         ${mock ? `<div class="mockup"><iframe src="${mock}" sandbox title="Design mockup"></iframe><a href="${mock}" target="_blank" rel="noopener">Open mockup in a new tab</a></div>` : ''}
         <div class="md">${renderMarkdown(o.markdown)}</div>
@@ -289,10 +290,7 @@ async function viewTask(id) {
   ${task.brief ? `<div class="brief">${renderMarkdown(task.brief)}</div>` : ''}
   ${task.error ? `<p class="error">${h(task.error)}</p>` : ''}
   ${actions.length ? `<div class="actions">${actions.join('')}</div>` : ''}
-  ${task.branch ? `<div class="branch"><strong>Code is on branch <code>${h(task.branch)}</code></strong>
-     ${diffStat ? `<pre>${h(diffStat)}</pre>` : ''}
-     <p class="muted">Review and merge it yourself, from your repo:</p>
-     <pre>git diff ${h(state.project.branch || 'main')}...${h(task.branch)}\ngit merge ${h(task.branch)}</pre></div>` : ''}
+  ${task.branch ? codeChanges(task, diff) : ''}
   ${deliverables || '<p class="empty">No deliverables yet.</p>'}
   <h3>Activity</h3>
   <ul class="log">${activity
@@ -355,16 +353,116 @@ async function render() {
     html = `<a class="back" href="#board">← Board</a><p class="error">${h(e.message)}</p>`;
   }
   if (seq !== renderSeq) return;
-  const openStates = [...viewEl.querySelectorAll('details.deliverable')].map((d) => d.open);
+  const openStates = new Map([...viewEl.querySelectorAll('details[data-key]')].map((d) => [d.dataset.key, d.open]));
+  const sameView = viewEl.dataset.route === location.hash;
   viewEl.innerHTML = html;
   viewEl.dataset.route = location.hash;
   if (draft !== undefined && viewEl.querySelector('#feedback')) {
     viewEl.querySelector('#feedback').value = draft;
     if (draftOpen) viewEl.querySelector('details.changes').open = true;
   }
-  const newDetails = viewEl.querySelectorAll('details.deliverable');
-  if (openStates.length === newDetails.length) newDetails.forEach((d, i) => (d.open = openStates[i]));
+  if (sameView) {
+    viewEl.querySelectorAll('details[data-key]').forEach((d) => {
+      if (openStates.has(d.dataset.key)) d.open = openStates.get(d.dataset.key);
+    });
+  }
+  const reviews = [...state.tasks.values()].filter((t) => t.status === 'review').length;
+  document.title = `${reviews ? `(${reviews}) ` : ''}Agent Office${state.project.name ? ` · ${state.project.name}` : ''}`;
 }
+
+// ---------- code review ----------
+
+function codeChanges(task, diff) {
+  const summary = diff?.stat ? diff.stat.trim().split('\n').pop() : '';
+  const base = state.project.branch || 'main';
+  return `<section class="code-review">
+    <h3>Code changes</h3>
+    <p>Branch <code>${h(task.branch)}</code>${summary ? ` <span class="muted">· ${h(summary.trim())}</span>` : ''}</p>
+    ${diff?.patch ? renderDiff(diff.patch) : '<p class="empty">No code changes on this branch yet.</p>'}
+    ${diff?.truncated ? '<p class="muted">The diff is large, so only the beginning is shown here. Use git to see the rest.</p>' : ''}
+    <p class="muted">Happy with it? Merge it from your repo (the agent never merges or pushes):</p>
+    <pre>git diff ${h(base)}...${h(task.branch)}\ngit merge ${h(task.branch)}</pre>
+  </section>`;
+}
+
+function renderDiff(patch) {
+  return patch
+    .split(/^(?=diff --git )/m)
+    .filter((chunk) => chunk.startsWith('diff --git'))
+    .map((chunk) => {
+      const lines = chunk.replace(/\n$/, '').split('\n');
+      const file = (lines[0].match(/ b\/(.+)$/) || [])[1] || lines[0];
+      let adds = 0;
+      let dels = 0;
+      const body = lines
+        .filter((l) => !/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|rename (from|to))/.test(l))
+        .map((l) => {
+          let cls = '';
+          if (l.startsWith('@@')) cls = 'hunk';
+          else if (l.startsWith('+')) (cls = 'add'), adds++;
+          else if (l.startsWith('-')) (cls = 'del'), dels++;
+          return `<span class="${cls}">${h(l) || ' '}</span>`;
+        })
+        .join(''); // spans are display:block, so no newline between them
+      return `<details class="file" data-key="file-${h(file)}">
+        <summary><code>${h(file)}</code> <span class="adds">+${adds}</span> <span class="dels">−${dels}</span></summary>
+        <pre class="diff">${body}</pre>
+      </details>`;
+    })
+    .join('');
+}
+
+// ---------- notifications ----------
+
+const NOTIFY_KEY = 'agent-office:notify';
+function notifyEnabled() {
+  try {
+    return localStorage.getItem(NOTIFY_KEY) === 'on' && 'Notification' in window && Notification.permission === 'granted';
+  } catch {
+    return false;
+  }
+}
+
+function renderNotifyButton() {
+  const b = $('#notifyBtn');
+  if (!('Notification' in window)) {
+    b.hidden = true;
+    return;
+  }
+  const on = notifyEnabled();
+  b.textContent = on ? '🔔 On' : '🔕 Notify me';
+  b.title = on ? 'You get a desktop notification when work needs you' : 'Get a desktop notification when work needs your review';
+  b.setAttribute('aria-pressed', String(on));
+}
+
+$('#notifyBtn').addEventListener('click', async () => {
+  try {
+    if (notifyEnabled()) localStorage.setItem(NOTIFY_KEY, 'off');
+    else if ((await Notification.requestPermission()) === 'granted') localStorage.setItem(NOTIFY_KEY, 'on');
+    else toast('Notifications are blocked in your browser settings.');
+  } catch {
+    toast('Notifications are not available here.');
+  }
+  renderNotifyButton();
+});
+
+const NOTIFY_TEXT = {
+  review: (t) => `${agentForStage(t.stage)?.name ?? 'An agent'} finished “${t.title}”. Your review is needed.`,
+  failed: (t) => `“${t.title}” failed: ${t.error || 'see the task for details'}`,
+  done: (t) => `“${t.title}” is done.`,
+};
+
+function maybeNotify(prev, task) {
+  if (!prev || prev.status === task.status || !NOTIFY_TEXT[task.status]) return;
+  if (!notifyEnabled() || !document.hidden) return;
+  const n = new Notification(`Agent Office · ${state.project.name || ''}`, { body: NOTIFY_TEXT[task.status](task), tag: `task-${task.id}` });
+  n.onclick = () => {
+    window.focus();
+    go(`task/${task.id}`);
+    n.close();
+  };
+}
+renderNotifyButton();
 
 // ---------- actions ----------
 

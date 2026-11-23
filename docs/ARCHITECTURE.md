@@ -53,7 +53,11 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
 7. **Gate**: the task waits in `review` until you approve. Approving moves it to the next stage.
    Requesting changes re-queues the same stage, and the next run **resumes the same Claude session**,
    so the agent keeps its context.
-8. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
+8. **Developer safety net**: after a developer run, the orchestrator commits anything left
+   uncommitted in the worktree and flags runs that changed nothing. The dashboard shows the
+   branch diff. When the task is done or cancelled, the worktree is removed and the branch kept.
+9. **Timeouts**: a run that takes longer than `runTimeoutMinutes` is aborted and marked failed.
+10. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
    office pauses.
 
 ## Why each piece exists (and its Paperclip equivalent)

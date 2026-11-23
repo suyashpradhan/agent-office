@@ -74,9 +74,18 @@ test('full pipeline with reviews, rework, and a dev worktree', async () => {
   assert.equal(db.getTask(task.id).branch, `office/task-${task.id}`);
   assert.ok(fs.existsSync(path.join(repo, '.office/worktrees', `task-${task.id}`)));
 
+  // Safety net: the mock developer leaves its edit uncommitted; the orchestrator commits it.
+  const detail = orch.taskDetail(task.id);
+  assert.match(detail.diff.patch, /AGENT_OFFICE_MOCK\.md/);
+  assert.match(detail.diff.stat, /1 file changed/);
+  assert.ok(detail.activity.some((a) => /saved them as a commit/.test(a.text)));
+
   orch.approve(task.id);
   assert.equal(db.getTask(task.id).status, 'done');
   assert.ok(events.some((e) => e.type === 'handoff'));
+  // Done: the temporary checkout is gone, the branch (and the diff) stay.
+  assert.ok(!fs.existsSync(path.join(repo, '.office/worktrees', `task-${task.id}`)));
+  assert.match(orch.taskDetail(task.id).diff.patch, /mock change for: Add dark mode/);
 
   // .office/ never shows up in the user's git status
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repo }).toString().trim(), '');
@@ -116,5 +125,30 @@ test('budget pauses the office', async () => {
   db.createTask({ title: 'x', brief: '', stages: ['research'], review: true });
   await waitFor(() => events.some((e) => e.type === 'office' && e.office.paused));
   assert.equal(db.runsForTask(1).length, 0);
+  orch.stop();
+});
+
+test('a run that takes too long times out', async () => {
+  const { ws, db, orch } = setup();
+  ws.config.runTimeoutMinutes = 0.0002; // ~12ms; the mock takes longer
+  orch.start();
+  const t = orch.createTask({ title: 'Slow', stages: ['research'], review: true });
+  await waitFor(() => db.getTask(t.id).status === 'failed');
+  assert.match(db.getTask(t.id).error, /Timed out/);
+  orch.stop();
+});
+
+test('cancelling a dev task removes its worktree but keeps the branch', async () => {
+  const { repo, db, orch } = setup();
+  orch.start();
+  const t = orch.createTask({ title: 'Cancel me', stages: ['dev'], review: true });
+  await waitFor(() => db.getTask(t.id).status === 'running' && fs.existsSync(path.join(repo, '.office/worktrees', `task-${t.id}`)));
+  orch.cancel(t.id);
+  await waitFor(() => !fs.existsSync(path.join(repo, '.office/worktrees', `task-${t.id}`)));
+  assert.equal(db.getTask(t.id).status, 'cancelled');
+  execFileSync('git', ['rev-parse', '--verify', `office/task-${t.id}`], { cwd: repo, stdio: 'ignore' });
+  // Retry recreates the worktree from the kept branch.
+  orch.retry(t.id);
+  await waitFor(() => db.getTask(t.id).status === 'review');
   orch.stop();
 });
