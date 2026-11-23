@@ -61,7 +61,19 @@ export function run({ agent, prompt, cwd, resumeSessionId, onActivity, onSession
       if (agent.workspace === 'worktree' && cwd && cwd.includes(`${path.sep}.office${path.sep}worktrees${path.sep}`)) {
         fs.appendFileSync(path.join(cwd, 'AGENT_OFFICE_MOCK.md'), `- mock change for: ${title}\n`);
       }
-      resolve({ ok: true, sessionId, costUsd: 0, output: fakeOutput(agent.stage, title, !!resumeSessionId) });
+      let output = fakeOutput(agent.stage, title, !!resumeSessionId);
+      // When the orchestrator invites delegation, the mock researcher proposes two sub-tasks.
+      if (agent.stage === 'research' && prompt.includes('subtasks')) {
+        output += `\n\n\`\`\`subtasks\n${JSON.stringify(
+          [
+            { title: `Prototype the core flow for ${title}`, brief: 'Mock proposal: design and build the smallest working version.', team: ['design', 'dev'] },
+            { title: `Write setup docs for ${title}`, brief: 'Mock proposal: a short README section.', team: ['dev'] },
+          ],
+          null,
+          2,
+        )}\n\`\`\`\n`;
+      }
+      resolve({ ok: true, sessionId, costUsd: 0, output });
     };
     signal?.addEventListener('abort', () => {
       clearTimeout(timer);

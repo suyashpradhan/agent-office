@@ -32,10 +32,12 @@ and the agents (Claude Code processes) only do the work.
 ## The life of a task
 
 ```
-queued ──checkout──▶ running ──ok──▶ review ──approve──▶ queued (next stage) ─ … ─▶ done
-                        │                └──request changes──▶ queued (same stage, resumes session)
-                        └──error──▶ failed ──retry──▶ queued
+proposed ──accept──▶ queued ──checkout──▶ running ──ok──▶ review ──approve──▶ queued (next stage) ─ … ─▶ done
+    │                                        │                └──request changes──▶ queued (same stage, resumes session)
+    └──dismiss──▶ dismissed                  └──error──▶ failed ──retry──▶ queued
 ```
+
+`proposed` only exists for sub-tasks an agent suggested (see Delegation below).
 
 1. **You create a task** (`POST /api/tasks`) with stages, e.g. `research → design → dev`.
 2. **Heartbeat** (every 2s, plus right away after any change) looks for an idle agent whose
@@ -61,7 +63,13 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
     A due routine creates an ordinary task, so everything above applies to it unchanged. Two
     policies keep it sane. *Overlap*: skip the run if the routine's previous task is still open.
     *Catch-up*: after downtime, fire once and schedule the next future slot.
-11. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
+11. **Delegation**: if the agent may delegate (`delegate` in its file, and the task's `depth` is
+    under `maxDelegationDepth`), the prompt invites it to end its deliverable with a fenced
+    `subtasks` JSON block. The orchestrator strips that block out and creates each entry as a
+    task with `status='proposed'`, `parent_id`, `depth+1` and `proposed_by`. The heartbeat only
+    takes `queued` tasks, so proposals wait for you. When you accept one, its prompt includes
+    the parent's brief and the deliverable it came from. That's how context flows down.
+12. **Budget**: every run reports its cost. When the project total reaches `budgetUsd`, the
    office pauses.
 
 ## Why each piece exists (and its Paperclip equivalent)
@@ -78,6 +86,7 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
 | Agent `.md` files (tools, workspace) | Least privilege per role | org chart, permissions, governance |
 | Adapter interface | Swap Claude for Codex, Gemini, a mock… | `packages/adapters/*` |
 | `routines` + `schedule.js` | Recurring work without you remembering to start it | routines, scheduled triggers |
+| `delegation.js`, `parent_id`, `proposed` status | Work flows down the team, with a human gate | delegation down the org chart, approvals |
 | `hasColumn` migrations in `db.js` | Old projects' databases keep working after upgrades | `packages/db` migrations |
 | Worktree per dev task | Agents never touch your working copy | execution workspaces |
 | `recoverInterrupted()` | Server restarts don't lose work | startup recovery |
@@ -88,11 +97,11 @@ queued ──checkout──▶ running ──ok──▶ review ──approve─
 Paperclip is built for many companies, many humans and agents running unattended around the
 clock. To keep this project readable, we skipped multi-tenancy and auth, agents delegating to
 other agents (an org hierarchy), goals and projects above tasks, skills management,
-secrets/connectors, and plugins. (Scheduled routines started on this list and are now built;
-see above.) Each of the rest would be a reasonable next exercise:
+secrets/connectors, and plugins. (Routines and delegation started on this list and are now
+built; see above.) Each of the rest would be a reasonable next exercise:
 
-- **Delegation**: let an agent's deliverable include `NEW_TASK:` lines that the orchestrator
-  turns into child tasks.
+- **Blocking relations**: let a parent wait until its sub-tasks are done (Paperclip has
+  "blocked by" links between issues).
 - **Another runtime**: copy `adapters/claude.js` into `adapters/codex.js` and pick it per agent.
 
 ## Security notes

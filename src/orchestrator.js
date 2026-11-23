@@ -16,6 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { delegationInstructions, extractSubtasks } from './delegation.js';
 import { parseSchedule, nextRun, nextRuns, describeSchedule, renderTitle } from './schedule.js';
 import { ensureWorktree, branchDiff, commitLeftovers, commitsAhead, removeWorktree, pruneWorktrees } from './workspace.js';
 
@@ -101,6 +102,9 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
   function cancel(taskId) {
     const task = mustGet(taskId);
     if (['done', 'cancelled'].includes(task.status)) return;
+    // Proposals under a cancelled task make no sense any more.
+    const withdrawn = db.dismissProposals(task.id);
+    withdrawn.forEach(emitTask);
     let running = false;
     for (const [runId, ctl] of controllers) {
       if (db.getRun(runId)?.task_id === task.id) {
@@ -145,6 +149,8 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
       outputs,
       activity: db.activityForTask(task.id),
       diff: task.branch ? branchDiff(ws, task.branch) : null,
+      parent: task.parent_id ? withMeta(db.getTask(task.parent_id)) : null,
+      children: db.childrenOf(task.id).map(withMeta),
     };
   }
 
@@ -273,16 +279,29 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
       }
     }
 
+    // Delegation: pull any proposed sub-tasks out of the deliverable.
+    let output = result.output;
+    let proposals = null;
+    if (canDelegate(agent, task)) {
+      const extracted = extractSubtasks(output, { agents, max: ws.config.maxSubtasksPerRun });
+      if (extracted.error) record({ taskId: task.id, runId: run.id, agentId: agent.id, kind: 'error', text: extracted.error });
+      else {
+        output = extracted.cleaned;
+        proposals = extracted.subtasks;
+      }
+    }
+
     // Save the deliverable as a handoff document the next agent (and you) can read.
     const dir = ws.taskDir(task.id);
     const outFile = path.join(dir, `${stage}.md`);
-    fs.writeFileSync(outFile, result.output);
-    const mockup = result.output.match(/```html\s*\n([\s\S]*?)```/);
+    fs.writeFileSync(outFile, output);
+    const mockup = output.match(/```html\s*\n([\s\S]*?)```/);
     if (mockup) fs.writeFileSync(path.join(dir, `${stage}-mockup.html`), mockup[1]);
 
     db.finishRun(run.id, { status: 'succeeded', cost_usd: result.costUsd ?? 0, output_file: outFile, session_id: result.sessionId ?? null });
     record({ taskId: task.id, runId: run.id, agentId: agent.id, kind: 'system', text: `${agent.name} finished ${stage} ($${(result.costUsd ?? 0).toFixed(3)})` });
     db.updateTask(task.id, { feedback: null });
+    if (proposals) proposeSubtasks(db.getTask(task.id), agent, proposals);
 
     const fresh = db.getTask(task.id);
     if (fresh.status === 'cancelled') {
@@ -299,7 +318,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
       advance(fresh, 'Auto-approved (review off)');
     }
     setLive(agent.id, { status: 'idle', taskId: null, runId: null, activity: '' });
-    bus.publish('run', { phase: 'finished', ok: true, agentId: agent.id, taskId: task.id, runId: run.id, stage });
+    bus.publish('run', { phase: 'finished', ok: true, agentId: agent.id, taskId: task.id, runId: run.id, stage, proposed: proposals?.length ?? 0 });
     emitOffice();
     wake();
   }
@@ -452,16 +471,101 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
     bus.publish('routines', { routines: listRoutines() });
   }
 
+  // ---------- delegation (sub-tasks) ----------
+  //
+  // Agents propose, you approve. A proposal is an ordinary task with status "proposed",
+  // a parent_id and a depth. The scheduler only picks up "queued" tasks, so proposals sit
+  // still until you accept them. Guardrails: a depth limit (no endless chains), a cap per
+  // run, and a rerun replaces the same agent's earlier pending proposals instead of
+  // piling up duplicates. Paperclip: delegation down the org chart + approvals.
+
+  function canDelegate(agent, task) {
+    return agent.delegate && (task.depth ?? 0) < Number(ws.config.maxDelegationDepth ?? 1) && Number(ws.config.maxSubtasksPerRun ?? 3) > 0;
+  }
+
+  function proposeSubtasks(parent, agent, list) {
+    const replaced = db.dismissProposals(parent.id, agent.id);
+    replaced.forEach(emitTask);
+    if (replaced.length && list.length) {
+      record({ taskId: parent.id, agentId: agent.id, kind: 'system', text: `${agent.name}'s new deliverable replaces ${replaced.length} earlier proposal(s)` });
+    }
+    if (!list.length) return;
+    const auto = !!ws.config.autoApproveSubtasks;
+    for (const s of list) {
+      const child = db.createTask({
+        title: s.title,
+        brief: s.brief,
+        stages: s.stages,
+        review: parent.review,
+        parentId: parent.id,
+        depth: (parent.depth ?? 0) + 1,
+        proposedBy: agent.id,
+        status: auto ? 'queued' : 'proposed',
+      });
+      record({ taskId: child.id, agentId: agent.id, kind: 'system', text: `Proposed as a sub-task of #${parent.id} "${parent.title}"` });
+      emitTask(child.id);
+    }
+    record({
+      taskId: parent.id,
+      agentId: agent.id,
+      kind: 'system',
+      text: `Proposed ${list.length} sub-task(s)${auto ? ' (auto-approved)' : ' for your approval'}`,
+    });
+    if (auto) wake();
+  }
+
+  function acceptSubtask(taskId) {
+    const task = mustGet(taskId);
+    if (!['proposed', 'dismissed'].includes(task.status)) throw httpError(409, 'Only proposed sub-tasks can be accepted');
+    db.updateTask(task.id, { status: 'queued' });
+    record({ taskId: task.id, kind: 'system', text: 'You accepted this sub-task' });
+    emitTask(task.id);
+    wake();
+  }
+
+  function dismissSubtask(taskId) {
+    const task = mustGet(taskId);
+    if (task.status !== 'proposed') throw httpError(409, 'Only proposed sub-tasks can be dismissed');
+    db.updateTask(task.id, { status: 'dismissed' });
+    record({ taskId: task.id, kind: 'system', text: 'You dismissed this sub-task' });
+    emitTask(task.id);
+  }
+
+  function acceptAllSubtasks(parentId) {
+    const parent = mustGet(parentId);
+    const pending = db.childrenOf(parent.id).filter((c) => c.status === 'proposed');
+    pending.forEach((c) => acceptSubtask(c.id));
+    return { accepted: pending.length };
+  }
+
   // ---------- prompt building (the "handoff") ----------
 
   function buildPrompt(task, stage, resuming) {
+    const agent = byStage.get(stage);
     if (resuming && task.feedback) {
-      return `The manager reviewed your previous deliverable and requested changes:\n\n${task.feedback}\n\nProduce a complete, revised deliverable (not just the diff).`;
+      const reminder = agent && canDelegate(agent, task)
+        ? '\n\nIf you proposed sub-tasks before, include the complete, updated subtasks block again. Anything you leave out is withdrawn.'
+        : '';
+      return `The manager reviewed your previous deliverable and requested changes:\n\n${task.feedback}\n\nProduce a complete, revised deliverable (not just the diff).${reminder}`;
     }
     if (resuming) {
       return `You were interrupted before finishing. Continue the task "${task.title}" and produce your complete final deliverable.`;
     }
     const parts = [`# Task: ${task.title}`, '', task.brief || '(no extra details)'];
+    // Context flows down: a sub-task sees where it came from.
+    if (task.parent_id) {
+      const parent = db.getTask(task.parent_id);
+      const proposer = agents.find((a) => a.id === task.proposed_by);
+      if (parent) {
+        parts.push('', '## Context: this is a sub-task', '', `${proposer?.name ?? 'A teammate'} proposed it while working on "${parent.title}" (task #${parent.id}).`);
+        if (parent.brief) parts.push('', 'The parent task\'s brief:', '', parent.brief);
+        const file = proposer && db.latestOutput(parent.id, proposer.stage);
+        if (file && fs.existsSync(file)) {
+          const text = fs.readFileSync(file, 'utf8');
+          parts.push('', `### ${proposer.name}'s deliverable on the parent task`, '', text.length > 8000 ? `${text.slice(0, 8000)}\n\n[...truncated]` : text);
+        }
+      }
+    }
     for (const prev of task.stages.slice(0, task.stages.indexOf(stage))) {
       const file = db.latestOutput(task.id, prev);
       if (file && fs.existsSync(file)) {
@@ -470,6 +574,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
       }
     }
     if (task.feedback) parts.push('', '## Feedback from the manager', '', task.feedback);
+    if (agent && canDelegate(agent, task)) parts.push('', delegationInstructions(agents, ws.config.maxSubtasksPerRun));
     return parts.join('\n');
   }
 
@@ -523,6 +628,7 @@ export function createOrchestrator({ ws, db, agents, adapter, bus, now = () => n
   return {
     snapshot, createTask, approve, requestChanges, retry, cancel, stopAgent, setPaused,
     taskDetail, agentDetail, taskFile, start, stop,
+    acceptSubtask, dismissSubtask, acceptAllSubtasks,
     listRoutines, createRoutine, updateRoutine, removeRoutine, runRoutineNow, schedulePreview,
     tick: heartbeat, // run one heartbeat right now (used by tests)
   };

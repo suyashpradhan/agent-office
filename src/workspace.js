@@ -28,6 +28,11 @@ const DEFAULT_CONFIG = {
   heartbeatMs: 2000,
   // Stop a run that takes longer than this (a hung process, an endless loop).
   runTimeoutMinutes: 30,
+  // Delegation: agents may propose sub-tasks. 1 = sub-tasks can't propose their own.
+  maxDelegationDepth: 1,
+  maxSubtasksPerRun: 3,
+  // Start proposed sub-tasks without asking you first. Off by default on purpose.
+  autoApproveSubtasks: false,
 };
 
 export function openWorkspace(repoArg) {

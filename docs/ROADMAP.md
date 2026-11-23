@@ -21,8 +21,11 @@
   A `routines` table, a cron parser, and a check in `heartbeat()` that creates tasks when due,
   with overlap (skip while the last task is open) and catch-up (fire once after downtime)
   policies. Paperclip: `routines`, scheduled triggers.
-- **Delegation**: an agent's deliverable can propose sub-tasks (`NEW_TASK:` lines). The
-  orchestrator turns them into child tasks after you approve. Paperclip: org chart, delegation.
+- [x] **Delegation**: agents propose sub-tasks in a fenced `subtasks` JSON block. They become
+  `proposed` tasks with a parent, start only when you accept, and get the parent's context.
+  Guardrails: depth limit, per-run cap, reruns replace old proposals, cancel withdraws them.
+  Paperclip: delegation down the org chart + approvals.
+- **Blocking**: a parent waits for its sub-tasks ("blocked by" links).
 - **A second runtime**: a Codex or Gemini CLI adapter selected per agent (`runtime: codex`).
   Paperclip: `packages/adapters/*`.
 - **Skills**: shared instruction files injected into an agent's prompt at runtime.

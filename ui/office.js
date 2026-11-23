@@ -119,7 +119,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
 
   function setTasks(list) {
     tasks = list;
-    const n = tasks.filter((x) => x.status === 'review').length;
+    const n = tasks.filter((x) => x.status === 'review' || x.status === 'proposed').length;
     trayBadge.textContent = n ? String(n) : '';
     trayBadge.classList.toggle('show', n > 0);
   }
@@ -165,6 +165,8 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
         { type: 'call', fn: () => flyPaper({ x: e.x, y: e.y - 12 }, { x: TRAY.x + 11, y: TRAY.y + 2 }, e.look.color) },
         { type: 'wait', ms: 1100, emote: '✅', dir: 'down' },
       ];
+      // Proposed sub-tasks? Show a light bulb before the check mark.
+      if (evt.proposed) e.plan.splice(3, 0, { type: 'wait', ms: 1300, emote: `💡×${evt.proposed}`, dir: 'down' });
     } else {
       flyPaper({ x: e.desk.cx, y: 70 }, { x: BOARD.x + BOARD.w / 2, y: BOARD.y + 20 }, e.look.color);
       e.plan = [{ type: 'wait', ms: 1200, emote: '✅', dir: 'up', pose: 'desk' }];
@@ -609,7 +611,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
     const cols = [
       { color: '#f2c94c', filter: (k) => k.status === 'queued' },
       { color: '#56a0f5', filter: (k) => k.status === 'running' },
-      { color: '#f2994a', filter: (k) => k.status === 'review' || k.status === 'failed' },
+      { color: '#f2994a', filter: (k) => k.status === 'review' || k.status === 'failed' || k.status === 'proposed' },
     ];
     const colW = Math.floor(w / 3);
     cols.forEach((col, i) => {
@@ -621,7 +623,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
         const nx = cx + 5 + (j % 4) * 9;
         const ny = y + 9 + Math.floor(j / 4) * 14;
         const owner = desks.find((d) => d.stage === task.stage);
-        const color = task.status === 'failed' ? '#ff8a80' : owner ? shade(owner.color, 0.55) : '#fff3a0';
+        const color = task.status === 'failed' ? '#ff8a80' : task.status === 'proposed' ? '#dfe3ea' : owner ? shade(owner.color, 0.55) : '#fff3a0';
         px(nx, ny, 7, 7, color);
         px(nx, ny, 7, 1, shade(color, -0.15));
         px(nx + 1, ny + 3, 4, 1, 'rgba(0,0,0,0.25)');
@@ -804,7 +806,7 @@ export function createOffice({ canvas, overlay, onSelect, onHint }) {
     px(x, y + 10, w, h - 10, '#946541');
     // tray
     px(TRAY.x, TRAY.y + 4, TRAY.w, 4, '#6d6d78');
-    const n = tasks.filter((k) => k.status === 'review').length;
+    const n = tasks.filter((k) => k.status === 'review' || k.status === 'proposed').length;
     for (let i = 0; i < Math.min(n, 5); i++) px(TRAY.x + 3, TRAY.y + 3 - i * 2, TRAY.w - 6, 2, i % 2 ? '#f1f1f1' : '#ffffff');
     // laptop
     px(x + 50, y + 1, 20, 3, '#c3c8d2');

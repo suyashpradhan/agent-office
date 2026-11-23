@@ -61,6 +61,7 @@ function handle(evt) {
       if (prev && prev.status !== 'done' && evt.task.status === 'done') office.celebrate();
       maybeNotify(prev, evt.task);
       invalidate(evt.task.id);
+      if (evt.task.parent_id) invalidate(evt.task.parent_id); // the parent page lists its sub-tasks
       render();
       break;
     }
@@ -183,7 +184,18 @@ $('#roster').addEventListener('click', (e) => {
 
 // ---------- views ----------
 
-const STATUS_LABEL = { queued: 'Queued', running: 'Working', review: 'Needs your review', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+const STATUS_LABEL = {
+  proposed: 'Proposed',
+  queued: 'Queued',
+  running: 'Working',
+  review: 'Needs your review',
+  done: 'Done',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  dismissed: 'Dismissed',
+};
+const needsYou = (t) => t.status === 'review' || t.status === 'failed' || t.status === 'proposed';
+const agentById = (id) => state.agents.find((a) => a.id === id);
 
 function agentForStage(stage) {
   return state.agents.find((a) => a.stage === stage);
@@ -201,8 +213,11 @@ function pipeline(task) {
 
 function card(task) {
   const a = agentForStage(task.stage);
-  return `<a class="card" href="#task/${task.id}" style="--agent:${h(a?.color || '#999')}">
+  const parent = task.parent_id ? state.tasks.get(task.parent_id) : null;
+  const proposer = agentById(task.proposed_by);
+  return `<a class="card ${task.status === 'proposed' ? 'proposed' : ''}" href="#task/${task.id}" style="--agent:${h(a?.color || '#999')}">
     <span class="card-title">${task.routine_id ? '<span title="Created by a routine" aria-label="Created by a routine">🔁</span> ' : ''}${h(task.title)}</span>
+    ${task.parent_id ? `<small class="lineage">↳ ${task.status === 'proposed' && proposer ? `💡 ${h(proposer.name)}'s idea, ` : ''}sub-task of ${parent ? `“${h(parent.title)}”` : `#${task.parent_id}`}</small>` : ''}
     <span class="status ${task.status}">${h(STATUS_LABEL[task.status] || task.status)}</span>
     ${pipeline(task)}
     ${task.costUsd ? `<small class="muted">$${task.costUsd.toFixed(3)}</small>` : ''}
@@ -222,14 +237,14 @@ function viewBoard() {
   }
   return [
     group('Working', all.filter((t) => t.status === 'running'), 'Nobody is working right now.'),
-    group('Needs you', all.filter((t) => t.status === 'review' || t.status === 'failed'), 'Nothing waiting for you.'),
+    group('Needs you', all.filter(needsYou), 'Nothing waiting for you.'),
     group('Queued', all.filter((t) => t.status === 'queued'), 'The queue is empty.'),
     group('Finished', all.filter((t) => t.status === 'done' || t.status === 'cancelled').slice(0, 12), 'Nothing finished yet.'),
   ].join('');
 }
 
 function viewInbox() {
-  const list = [...state.tasks.values()].filter((t) => t.status === 'review' || t.status === 'failed');
+  const list = [...state.tasks.values()].filter(needsYou);
   return `<h2>Your inbox</h2><p class="muted">Work lands here when an agent finishes a step. Approve it to hand it to the next teammate, or ask for changes.</p>
     ${list.length ? list.map(card).join('') : '<p class="empty">Inbox zero. Nice.</p>'}`;
 }
@@ -393,9 +408,14 @@ async function viewTask(id) {
     d = await api(`/api/tasks/${id}`);
     detailCache.set(Number(id), d);
   }
-  const { task, outputs, activity, diff } = d;
+  const { task, outputs, activity, diff, parent, children } = d;
   const next = agentForStage(task.stages[task.stage_index + 1]);
   const actions = [];
+  if (task.status === 'proposed') {
+    actions.push(`<button class="btn primary" data-action="subtask-accept" data-id="${task.id}">Accept and start</button>`);
+    actions.push(`<button class="btn" data-action="subtask-dismiss" data-id="${task.id}">Dismiss</button>`);
+  }
+  if (task.status === 'dismissed') actions.push(`<button class="btn" data-action="subtask-accept" data-id="${task.id}">Accept after all</button>`);
   if (task.status === 'review') {
     actions.push(`<button class="btn primary" data-action="approve">${next ? `Approve and hand to ${h(next.name)}` : 'Approve and finish'}</button>`);
     actions.push(`<details class="changes" data-key="changes"><summary class="btn">Request changes</summary>
@@ -421,14 +441,16 @@ async function viewTask(id) {
     .join('');
 
   return `<a class="back" href="#board">← Board</a>
+  ${parent ? `<p class="lineage">↳ Sub-task of <a href="#task/${parent.id}">“${h(parent.title)}”</a>${agentById(task.proposed_by) ? `, proposed by ${h(agentById(task.proposed_by).name)}` : ''}</p>` : ''}
   <h2>${h(task.title)}</h2>
   <p><span class="status ${task.status}">${h(STATUS_LABEL[task.status])}</span> ${task.routine_id ? '<a class="muted" href="#routines">🔁 from a routine</a> · ' : ''}<span class="muted">Task #${task.id} · spent $${task.costUsd.toFixed(3)}</span></p>
   ${pipeline(task)}
   ${task.brief ? `<div class="brief">${renderMarkdown(task.brief)}</div>` : ''}
   ${task.error ? `<p class="error">${h(task.error)}</p>` : ''}
   ${actions.length ? `<div class="actions">${actions.join('')}</div>` : ''}
+  ${children.length ? subtaskList(children) : ''}
   ${task.branch ? codeChanges(task, diff) : ''}
-  ${deliverables || '<p class="empty">No deliverables yet.</p>'}
+  ${deliverables || `<p class="empty">${task.status === 'proposed' ? 'Nothing runs until you accept it.' : 'No deliverables yet.'}</p>`}
   <h3>Activity</h3>
   <ul class="log">${activity
     .slice(-60)
@@ -473,7 +495,7 @@ async function render() {
   const seq = ++renderSeq;
   if (r.name !== 'agent') office.select(null);
   document.querySelectorAll('.tabs a').forEach((t) => t.classList.toggle('active', t.getAttribute('href') === `#${r.name}`));
-  const reviewCount = [...state.tasks.values()].filter((t) => t.status === 'review').length;
+  const reviewCount = [...state.tasks.values()].filter((t) => t.status === 'review' || t.status === 'proposed').length;
   $('#inboxCount').textContent = reviewCount || '';
   if (r.name === 'new' && viewEl.querySelector('#newTask') && viewEl.dataset.route === location.hash) return; // don't wipe a half-typed form
   if (r.name === 'routines' && r.id && viewEl.querySelector('#routineForm') && viewEl.dataset.route === location.hash) return;
@@ -506,8 +528,31 @@ async function render() {
       if (openStates.has(d.dataset.key)) d.open = openStates.get(d.dataset.key);
     });
   }
-  const reviews = [...state.tasks.values()].filter((t) => t.status === 'review').length;
+  const reviews = [...state.tasks.values()].filter((t) => t.status === 'review' || t.status === 'proposed').length;
   document.title = `${reviews ? `(${reviews}) ` : ''}Agent Office${state.project.name ? ` · ${state.project.name}` : ''}`;
+}
+
+// ---------- delegation ----------
+
+function subtaskList(children) {
+  const pending = children.filter((c) => c.status === 'proposed');
+  const visible = children.filter((c) => c.status !== 'dismissed');
+  const dismissed = children.length - visible.length;
+  return `<section class="subtasks">
+    <div class="view-head"><h3>Sub-tasks</h3>${pending.length > 1 ? `<button class="btn" data-action="subtask-accept-all">Accept all ${pending.length}</button>` : ''}</div>
+    ${pending.length ? `<p class="muted">Your team proposed these. Nothing starts until you accept it.</p>` : ''}
+    <ul class="subtask-list">${visible
+      .map((c) => {
+        const who = agentById(c.proposed_by);
+        return `<li class="${c.status}" style="--agent:${h(who?.color || '#9aa0a6')}">
+          <div><a href="#task/${c.id}">${h(c.title)}</a> <span class="status ${c.status}">${h(STATUS_LABEL[c.status] || c.status)}</span>
+            <br><small class="muted">${c.stages.map((s) => h(agentForStage(s)?.name || s)).join(' → ')}${c.brief ? ` · ${h(c.brief.slice(0, 140))}${c.brief.length > 140 ? '…' : ''}` : ''}</small></div>
+          ${c.status === 'proposed' ? `<div class="subtask-actions"><button class="btn primary" data-action="subtask-accept" data-id="${c.id}">Accept</button><button class="btn" data-action="subtask-dismiss" data-id="${c.id}">Dismiss</button></div>` : ''}
+        </li>`;
+      })
+      .join('')}</ul>
+    ${dismissed ? `<p class="muted small">${dismissed} dismissed or replaced proposal(s) hidden.</p>` : ''}
+  </section>`;
 }
 
 // ---------- code review ----------
@@ -590,10 +635,12 @@ const NOTIFY_TEXT = {
   review: (t) => `${agentForStage(t.stage)?.name ?? 'An agent'} finished “${t.title}”. Your review is needed.`,
   failed: (t) => `“${t.title}” failed: ${t.error || 'see the task for details'}`,
   done: (t) => `“${t.title}” is done.`,
+  proposed: (t) => `${agentById(t.proposed_by)?.name ?? 'An agent'} proposed a sub-task: “${t.title}”`,
 };
 
 function maybeNotify(prev, task) {
-  if (!prev || prev.status === task.status || !NOTIFY_TEXT[task.status]) return;
+  if (prev?.status === task.status || !NOTIFY_TEXT[task.status]) return;
+  if (!prev && task.status !== 'proposed') return; // brand-new tasks are only news if an agent proposed them
   if (!notifyEnabled() || !document.hidden) return;
   const n = new Notification(`Agent Office · ${state.project.name || ''}`, { body: NOTIFY_TEXT[task.status](task), tag: `task-${task.id}` });
   n.onclick = () => {
@@ -645,6 +692,19 @@ viewEl.addEventListener('click', async (e) => {
   }
   const b = e.target.closest('[data-action]');
   if (!b) return;
+  if (b.dataset.action.startsWith('subtask-')) {
+    try {
+      if (b.dataset.action === 'subtask-accept') await api(`/api/tasks/${b.dataset.id}/accept`, {});
+      if (b.dataset.action === 'subtask-dismiss') await api(`/api/tasks/${b.dataset.id}/dismiss`, {});
+      if (b.dataset.action === 'subtask-accept-all') {
+        const r = await api(`/api/tasks/${route().id}/accept-subtasks`, {});
+        toast(`Started ${r.accepted} sub-task(s)`);
+      }
+    } catch (err) {
+      toast(err.message);
+    }
+    return;
+  }
   if (b.dataset.action.startsWith('routine-')) {
     const rid = b.dataset.id;
     try {

@@ -47,6 +47,8 @@ export function parseAgentFile(file) {
     // "none" (default) = no MCP servers; "inherit" = use the MCP servers from your Claude config.
     mcp: meta.mcp === 'inherit' ? 'inherit' : 'none',
     enabled: meta.enabled !== 'false',
+    // May this agent propose sub-tasks? (`delegate: false` in the agent file turns it off.)
+    delegate: meta.delegate !== 'false',
     prompt: match[2].trim(),
   };
 }

@@ -50,7 +50,15 @@ agent-office --mock
 `.office/config.json`
 
 ```json
-{ "budgetUsd": 5, "reviewBetweenStages": true, "heartbeatMs": 2000, "runTimeoutMinutes": 30 }
+{
+  "budgetUsd": 5,
+  "reviewBetweenStages": true,
+  "heartbeatMs": 2000,
+  "runTimeoutMinutes": 30,
+  "maxDelegationDepth": 1,
+  "maxSubtasksPerRun": 3,
+  "autoApproveSubtasks": false
+}
 ```
 
 `.office/agents/*.md` sets each agent's role prompt, tools, workspace, model and budget per run:
@@ -67,6 +75,7 @@ workspace: repo          # repo = read your checkout, worktree = own git branch
 maxBudgetUsd: 1.00
 model:                   # optional, e.g. claude-sonnet-5-5 for a cheaper agent
 mcp:                     # leave empty for none, or "inherit" to use your Claude MCP servers
+delegate:                # set to false to stop this agent proposing sub-tasks
 ---
 You are Scout, the Researcher...
 ```
@@ -97,6 +106,26 @@ git merge office/task-3
 | `agent-office --mock` | simulated agents, no Claude calls |
 | `agent-office init` | just create `.office/` so you can edit agents first |
 | `npm test` | end-to-end tests (mock adapter) |
+
+## Delegation (agents propose sub-tasks)
+
+While working, an agent can notice that a task splits into separate pieces. For example, Scout's
+research might reveal "build the settings screen" and "write setup docs". It proposes these
+as **sub-tasks**, and you'll see a 💡 when it drops its work at your desk. The task page lists them with
+**Accept** and **Dismiss** buttons, and nothing starts until you accept. An accepted sub-task
+runs through the team like any task, and its prompt includes the parent task and the
+deliverable it came from, so the agent picking it up has the context.
+
+Guardrails, all in `.office/config.json`:
+
+```json
+{ "maxDelegationDepth": 1, "maxSubtasksPerRun": 3, "autoApproveSubtasks": false }
+```
+
+- With depth 1, sub-tasks can't propose sub-sub-tasks (no endless chains).
+- When an agent reruns after you request changes, its new proposals replace its old ones.
+- Cancelling a task withdraws its pending proposals.
+- Add `delegate: false` to an agent's file to stop it proposing.
 
 ## Routines (scheduled work)
 

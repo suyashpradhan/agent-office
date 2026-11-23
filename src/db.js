@@ -22,7 +22,7 @@ export function openDb(file) {
       brief       TEXT NOT NULL DEFAULT '',
       stages      TEXT NOT NULL,              -- JSON array, e.g. ["research","design","dev"]
       stage_index INTEGER NOT NULL DEFAULT 0, -- which stage we're on
-      status      TEXT NOT NULL,              -- queued | running | review | done | failed | cancelled
+      status      TEXT NOT NULL,              -- proposed | queued | running | review | done | failed | cancelled | dismissed
       assignee    TEXT,                       -- agent id currently holding the task
       review      INTEGER NOT NULL DEFAULT 1, -- pause for approval between stages?
       feedback    TEXT,                       -- your "request changes" note, consumed by the next run
@@ -74,6 +74,10 @@ export function openDb(file) {
   // Each one is safe to run every time (it checks before altering).
   const hasColumn = (table, column) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
   if (!hasColumn('tasks', 'routine_id')) db.exec(`ALTER TABLE tasks ADD COLUMN routine_id INTEGER`);
+  // Delegation: a sub-task points at its parent; depth limits how deep delegation can go.
+  if (!hasColumn('tasks', 'parent_id')) db.exec(`ALTER TABLE tasks ADD COLUMN parent_id INTEGER`);
+  if (!hasColumn('tasks', 'depth')) db.exec(`ALTER TABLE tasks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0`);
+  if (!hasColumn('tasks', 'proposed_by')) db.exec(`ALTER TABLE tasks ADD COLUMN proposed_by TEXT`);
 
   const q = (sql) => db.prepare(sql);
   const parseRoutine = (row) => row && { ...row, stages: JSON.parse(row.stages), review: !!row.review, enabled: !!row.enabled };
@@ -83,10 +87,11 @@ export function openDb(file) {
     raw: db,
 
     // ---- tasks ----
-    createTask({ title, brief, stages, review, routineId = null }) {
+    createTask({ title, brief, stages, review, routineId = null, parentId = null, depth = 0, proposedBy = null, status = 'queued' }) {
       const { lastInsertRowid } = q(
-        `INSERT INTO tasks (title, brief, stages, status, review, routine_id) VALUES (?, ?, ?, 'queued', ?, ?)`,
-      ).run(title, brief, JSON.stringify(stages), review ? 1 : 0, routineId);
+        `INSERT INTO tasks (title, brief, stages, status, review, routine_id, parent_id, depth, proposed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(title, brief, JSON.stringify(stages), status, review ? 1 : 0, routineId, parentId, depth, proposedBy);
       return this.getTask(Number(lastInsertRowid));
     },
     getTask(id) {
@@ -177,6 +182,18 @@ export function openDb(file) {
       return q(
         `UPDATE tasks SET status = 'queued', assignee = NULL, updated_at = datetime('now') WHERE status = 'running'`,
       ).run().changes;
+    },
+
+    childrenOf(parentId) {
+      return q(`SELECT * FROM tasks WHERE parent_id = ? ORDER BY id`).all(parentId).map(parseTask);
+    },
+    // Withdraw pending proposals under a parent (optionally only one agent's). Returns their ids.
+    dismissProposals(parentId, proposedBy = null) {
+      const where = `parent_id = ? AND status = 'proposed'${proposedBy ? ' AND proposed_by = ?' : ''}`;
+      const args = proposedBy ? [parentId, proposedBy] : [parentId];
+      const ids = q(`SELECT id FROM tasks WHERE ${where}`).all(...args).map((r) => r.id);
+      q(`UPDATE tasks SET status = 'dismissed', updated_at = datetime('now') WHERE ${where}`).run(...args);
+      return ids;
     },
 
     // ---- routines ----
